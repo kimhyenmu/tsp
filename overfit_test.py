@@ -22,32 +22,37 @@ from model.topmodel import HybridRoutingModel
 from dataset_loss import DeliveryDataset, collate_fn
 
 
-# 🔥 Xavier 초기화 함수
+# 🔥 Xavier 초기화 함수 (Gain 증폭!)
 def init_weights(module):
     """
-    Xavier/Glorot 초기화 적용
-    - Linear: Xavier Uniform
-    - Embedding: Normal(0, 0.02)
+    Xavier/Glorot 초기화 적용 (강화 버전)
+    - Linear: Xavier Uniform with gain=2.0 (차이를 벌림)
+    - Embedding: Normal(0, 0.1) (더 큰 분산)
     - LayerNorm: weight=1, bias=0
-    - Bias: 0.01 (작은 양수로 Dead Neuron 방지)
+    - Bias: 0으로 (차이를 덮지 않게)
     """
+    # 🔥 simple_embedding은 이미 별도로 초기화했으므로 건너뜀
+    if hasattr(module, '_custom_initialized'):
+        return
+        
     if isinstance(module, nn.Linear):
-        nn.init.xavier_uniform_(module.weight, gain=1.0)
+        # 🔥 gain=2.0으로 가중치 차이 증폭
+        nn.init.xavier_uniform_(module.weight, gain=2.0)
         if module.bias is not None:
-            nn.init.constant_(module.bias, 0.01)  # 🔥 0이 아닌 작은 값
+            nn.init.constant_(module.bias, 0.0)  # 🔥 bias=0 (차이를 덮지 않게)
     elif isinstance(module, nn.Embedding):
-        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        nn.init.normal_(module.weight, mean=0.0, std=0.1)  # 🔥 더 큰 std
     elif isinstance(module, nn.LayerNorm):
         nn.init.constant_(module.weight, 1.0)
         nn.init.constant_(module.bias, 0.0)
-    elif isinstance(module, nn.LSTM):
+    elif isinstance(module, nn.LSTMCell):
         for name, param in module.named_parameters():
             if 'weight_ih' in name:
-                nn.init.xavier_uniform_(param)
+                nn.init.xavier_uniform_(param, gain=2.0)
             elif 'weight_hh' in name:
-                nn.init.orthogonal_(param)
+                nn.init.orthogonal_(param, gain=2.0)
             elif 'bias' in name:
-                nn.init.constant_(param, 0.01)
+                nn.init.constant_(param, 0.0)
 
 
 def create_mini_dataset(data_path, num_samples=10):
@@ -284,6 +289,17 @@ def overfit_test(
     # 🔥 Xavier 초기화 강제 적용
     print("   - Xavier 초기화 적용 중...")
     model.apply(init_weights)
+    
+    # 🔥 simple_embedding은 gain=10으로 다시 강제 초기화 (매우 중요!)
+    if BYPASS_GNN:
+        print("   - Simple Embedding 가중치 10배 증폭!")
+        nn.init.xavier_uniform_(model.simple_embedding.weight, gain=10.0)
+        
+        # 🔥 초기화 후 가중치 통계 출력
+        w = model.simple_embedding.weight
+        print(f"   - 가중치 shape: {w.shape}")
+        print(f"   - 가중치 mean: {w.mean().item():.4f}, std: {w.std().item():.4f}")
+        print(f"   - 가중치 min/max: {w.min().item():.4f} / {w.max().item():.4f}")
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"   - 파라미터 수: {total_params:,}")

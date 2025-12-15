@@ -28,11 +28,11 @@ class HybridRoutingModel(nn.Module):
         self.bypass_gnn = bypass_gnn  # 🔥 저장
         
         # 🔥 단순 Linear Embedding (GNN Bypass 시 사용)
-        self.simple_embedding = nn.Sequential(
-            nn.Linear(node_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.LeakyReLU(0.1)
-        )
+        # bias=False로 편향이 차이를 덮는 것 방지!
+        self.simple_embedding = nn.Linear(node_dim, hidden_dim, bias=False)
+        
+        # 🔥 가중치를 크게 초기화 (gain=10)
+        nn.init.xavier_uniform_(self.simple_embedding.weight, gain=10.0)
         
         self.gnn_encoder = GraphEncoder(
             node_dim=node_dim,
@@ -67,8 +67,9 @@ class HybridRoutingModel(nn.Module):
         # 🔥 GNN Bypass 모드: 단순 Linear Embedding만 사용
         # ============================================================
         if self.bypass_gnn:
-            # 좌표를 직접 Linear로 임베딩 (GNN 없이)
+            # 🔥 좌표를 직접 Linear로 임베딩 (GNN 없이, bias 없음!)
             gnn_features = self.simple_embedding(node_features)  # (batch, max_nodes, hidden)
+            # LayerNorm이나 활성화 함수 없이 순수하게 Linear만!
             
             if debug:
                 print("\n" + "="*60)
