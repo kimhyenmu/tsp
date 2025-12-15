@@ -10,23 +10,21 @@ import math
 
 class Attention(nn.Module):
     """
-    표준 Bahdanau (Additive) Attention
-    - Scaled by sqrt(hidden_dim)
-    - Tanh clipping으로 Gradient 보호
+    🔥🔥🔥 Dot-Product Attention + Tanh Boosting
+    - Scaled Dot-Product: (Q @ K^T) / sqrt(d)
+    - Tanh Clipping & 10x Boosting으로 차이 극대화
     """
     def __init__(self, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
         
-        # Bahdanau Attention: v^T * tanh(W_q * q + W_k * k)
+        # Query, Key 변환 (bias 없음!)
         self.W_query = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.W_key = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.v = nn.Linear(hidden_dim, 1, bias=False)
         
-        # 초기화
-        nn.init.xavier_uniform_(self.W_query.weight)
-        nn.init.xavier_uniform_(self.W_key.weight)
-        nn.init.xavier_uniform_(self.v.weight)
+        # 🔥 가중치를 크게 초기화 (차이 증폭)
+        nn.init.xavier_uniform_(self.W_query.weight, gain=2.0)
+        nn.init.xavier_uniform_(self.W_key.weight, gain=2.0)
         
     def forward(self, query, keys, mask=None):
         """
@@ -36,34 +34,34 @@ class Attention(nn.Module):
             mask: (batch, num_nodes) - True면 해당 노드 선택 불가
             
         Returns:
-            logits: (batch, num_nodes) - attention scores (softmax 전)
-            probs: (batch, num_nodes) - attention weights (softmax 후)
+            logits: (batch, num_nodes) - attention scores
+            probs: (batch, num_nodes) - attention weights
         """
         batch_size, num_nodes, _ = keys.shape
         
-        # Query 변환: (batch, hidden_dim) -> (batch, 1, hidden_dim)
-        q = self.W_query(query).unsqueeze(1)  # (batch, 1, hidden)
+        # 🔥 [1] Query, Key 변환
+        q = self.W_query(query)  # (batch, hidden_dim)
+        k = self.W_key(keys)      # (batch, num_nodes, hidden_dim)
         
-        # Key 변환: (batch, num_nodes, hidden_dim)
-        k = self.W_key(keys)  # (batch, num_nodes, hidden)
+        # 🔥 [2] Dot-Product Attention Score
+        # score = Q @ K^T = (batch, hidden) @ (batch, hidden, nodes) = (batch, nodes)
+        q = q.unsqueeze(1)  # (batch, 1, hidden)
+        score = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
+        score = score.squeeze(1)  # (batch, num_nodes)
         
-        # 🔥 [1] Bahdanau Attention Score 계산
-        # energy = v^T * tanh(q + k)
-        energy = torch.tanh(q + k)  # (batch, num_nodes, hidden)
-        logits = self.v(energy).squeeze(-1)  # (batch, num_nodes)
+        # 🔥 [3] Scaling: sqrt(hidden_dim)으로 나누기 (먼저!)
+        score = score / math.sqrt(self.hidden_dim)
         
-        # 🔥 [2] Scaling: sqrt(hidden_dim)으로 나누기
-        logits = logits / math.sqrt(self.hidden_dim)
+        # 🔥🔥🔥 [4] 핵심: Tanh Clipping & 10x Boosting!
+        # tanh는 값을 -1~1로 정규화, *10은 차이를 극대화
+        # 이렇게 해야 Softmax가 노드를 구분할 수 있음!
+        logits = 10.0 * torch.tanh(score)
         
-        # 🔥 [3] Tanh Clipping: -10 ~ +10 범위로 강제 제한
-        # 이게 없으면 Softmax Saturation으로 Gradient가 죽음!
-        logits = 10.0 * torch.tanh(logits)
-        
-        # 🔥 [4] Masking: 방문한 노드는 -inf로
+        # 🔥 [5] Masking: 방문한 노드는 -inf로
         if mask is not None:
             logits = logits.masked_fill(mask.bool(), -1e9)
         
-        # Softmax로 확률 계산
+        # Softmax
         probs = F.softmax(logits, dim=-1)
         
         return logits, probs
@@ -135,7 +133,7 @@ class PointerDecoder(nn.Module):
                 
     def forward(self, encoder_output, node_coords, start_hour,
                 num_nodes_list=None, teacher_route=None, 
-                teacher_forcing_ratio=0.5, training=True):
+                teacher_forcing_ratio=0.5, training=True, debug=False):
         """
         Args:
             encoder_output: (batch, num_nodes, hidden_dim) - GNN/Transformer 출력
@@ -145,6 +143,7 @@ class PointerDecoder(nn.Module):
             teacher_route: (batch, num_nodes) - 정답 경로
             teacher_forcing_ratio: float - teacher forcing 비율
             training: bool - 학습 모드 여부
+            debug: bool - 디버깅 출력 여부
         """
         batch_size, max_nodes, hidden_dim = encoder_output.shape
         device = encoder_output.device
@@ -200,6 +199,28 @@ class PointerDecoder(nn.Module):
             raw_logits, _ = self.pointer(query, encoder_output, mask=None)
             all_logits.append(raw_logits)
             all_attn.append(probs)
+            
+            # 🔥 디버깅: 첫 스텝의 Attention Score 출력
+            if debug and step == 0:
+                print("\n" + "="*60)
+                print("🔍 [DEBUG] Pointer Attention Score (Step 0)")
+                print("="*60)
+                n = num_nodes_list[0] if num_nodes_list else max_nodes
+                print(f"Raw logits (마스킹 전) 샘플0, 노드 0~{min(5,n)-1}:")
+                print(f"   {raw_logits[0, :min(5,n)].detach().cpu().numpy()}")
+                print(f"Logits min/max: {raw_logits[0,:n].min().item():.4f} / {raw_logits[0,:n].max().item():.4f}")
+                print(f"Probs (softmax 후) 샘플0, 노드 0~{min(5,n)-1}:")
+                print(f"   {probs[0, :min(5,n)].detach().cpu().numpy()}")
+                print(f"Probs max: {probs[0,:n].max().item():.4f} (uniform이면 ~{1.0/n:.4f})")
+                
+                # Uniform 체크
+                uniform_prob = 1.0 / n
+                max_prob = probs[0,:n].max().item()
+                if max_prob < uniform_prob * 1.5:
+                    print("⚠️ 경고: Softmax가 거의 Uniform! Attention 차이가 부족함")
+                else:
+                    print("✅ Softmax 분포가 뾰족함! Attention 작동 중")
+                print("="*60 + "\n")
             
             # 🔥 [Step 5] 다음 노드 선택
             if training and teacher_route is not None:

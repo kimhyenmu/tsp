@@ -164,10 +164,11 @@ class HybridRoutingModel(nn.Module):
             encoder_output=context_features,
             node_coords=node_features,
             start_hour=batch['start_hour'],
-            num_nodes_list=num_nodes_list,  # 🔥 추가
+            num_nodes_list=num_nodes_list,
             teacher_route=teacher_route,
             teacher_forcing_ratio=teacher_forcing_ratio,
-            training=training
+            training=training,
+            debug=debug  # 🔥 debug 전달
         )
         
         return {
