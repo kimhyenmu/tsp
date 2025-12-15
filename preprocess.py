@@ -540,6 +540,23 @@ def step4_prepare_and_save(trip_df, output_dir, config=Config):
     with open(f'{output_dir}/test_data.pkl', 'wb') as f:
         pickle.dump(test_data, f)
     
+    # 🔥 시간 데이터 통계 계산 (정규화/스케일링용)
+    all_segment_times = []
+    for _, row in trip_df.iterrows():
+        all_segment_times.extend(row['actual_segment_times'])
+    
+    time_mean = np.mean(all_segment_times)
+    time_std = np.std(all_segment_times)
+    time_min = np.min(all_segment_times)
+    time_max = np.max(all_segment_times)
+    time_median = np.median(all_segment_times)
+    
+    print(f"\n⏱️ 시간 데이터 통계:")
+    print(f"   - 평균: {time_mean:.1f}초 ({time_mean/60:.1f}분)")
+    print(f"   - 표준편차: {time_std:.1f}초")
+    print(f"   - 범위: {time_min:.1f} ~ {time_max:.1f}초")
+    print(f"   - 중앙값: {time_median:.1f}초")
+    
     # 메타데이터
     metadata = {
         'num_train': len(train_data),
@@ -552,6 +569,12 @@ def step4_prepare_and_save(trip_df, output_dir, config=Config):
         'avg_nodes': trip_df['num_nodes'].mean(),
         'max_nodes': trip_df['num_nodes'].max(),
         'min_nodes': trip_df['num_nodes'].min(),
+        # 🔥 시간 통계 추가
+        'time_mean': float(time_mean),
+        'time_std': float(time_std),
+        'time_min': float(time_min),
+        'time_max': float(time_max),
+        'time_median': float(time_median),
     }
     
     with open(f'{output_dir}/metadata.pkl', 'wb') as f:

@@ -32,7 +32,10 @@ class PointerAttention(nn.Module):
         logits = logits * self.scale
         
         if mask is not None:
-            logits = logits.masked_fill(mask.bool(), -10000.0)
+            # 🔥 마스킹 값을 충분히 크게 설정
+            # -inf 대신 -1e9 사용 (수치 안정성)
+            # 이 값은 softmax 후 거의 0이 됨
+            logits = logits.masked_fill(mask.bool(), -1e9)
         
         attention_weights = F.softmax(logits, dim=-1)
         
@@ -40,6 +43,11 @@ class PointerAttention(nn.Module):
 
 
 class TimePredictor(nn.Module):
+    """
+    🔥 개선된 시간 예측기
+    - 학습 가능한 스케일/바이어스 파라미터 추가
+    - 거리 기반 baseline 추정 포함
+    """
     def __init__(self, hidden_dim, dropout=0.1):
         super().__init__()
         
@@ -61,6 +69,11 @@ class TimePredictor(nn.Module):
             nn.Linear(hidden_dim // 4, 1)
         )
         
+        # 🔥 학습 가능한 출력 스케일링 파라미터
+        # 데이터 분포에 맞게 자동 조정됨
+        self.output_scale = nn.Parameter(torch.tensor(300.0))  # 평균 시간 (초)
+        self.output_bias = nn.Parameter(torch.tensor(200.0))   # 최소 시간 (초)
+        
     def forward(self, current_node_emb, next_node_emb, current_hour, distance=None):
         batch_size = current_node_emb.size(0)
         
@@ -73,10 +86,22 @@ class TimePredictor(nn.Module):
         
         features = torch.cat([current_node_emb, next_node_emb, hour_emb, distance], dim=-1)
         fused = self.feature_fusion(features)
-        predicted_time = self.time_head(fused).squeeze(-1)
+        raw_output = self.time_head(fused).squeeze(-1)
         
-        # 더 넓은 범위로 출력
-        predicted_time = F.softplus(predicted_time) * 500 + 100 
+        # 🔥 개선된 출력 변환
+        # 1. softplus로 양수 보장
+        # 2. 학습 가능한 scale/bias로 데이터 분포에 적응
+        # 3. 거리 기반 baseline 추가 (거리가 멀수록 시간 증가)
+        base_time = F.softplus(raw_output) * torch.abs(self.output_scale) + torch.abs(self.output_bias)
+        
+        # 거리 기반 보정 (정규화된 좌표 기준, 거리 * 상수)
+        # 거리 0.1 (정규화 좌표) ≈ 실제 몇 km → 시간 보정
+        distance_factor = distance.squeeze(-1) * 1000.0  # 거리에 비례한 시간 추가
+        
+        predicted_time = base_time + distance_factor
+        
+        # 최소/최대 범위 클램핑 (비정상적인 값 방지)
+        predicted_time = torch.clamp(predicted_time, min=60.0, max=7200.0)  # 1분 ~ 2시간
         
         return predicted_time
 
@@ -135,12 +160,11 @@ class PointerDecoder(nn.Module):
             lstm_out, hidden_state = self.lstm(current_input.unsqueeze(1), hidden_state)
             decoder_state = lstm_out.squeeze(1)
             
-            # 마스킹 전 raw logits (Loss 계산용)
-            raw_logits, _ = self.pointer_attention(decoder_state, encoder_output, mask=None)
-            
-            # 마스킹 적용된 logits (노드 선택용)
+            # 🔥 수정: 마스킹된 logits를 Loss 계산에도 사용!
+            # 이미 방문한 노드는 -inf로 처리되어 softmax 후 0에 가까워짐
+            # 이렇게 해야 모델이 "방문한 노드를 피해야 한다"는 것을 학습함
             logits, attn_weights = self.pointer_attention(decoder_state, encoder_output, mask)
-            logits_sequence.append(raw_logits)  # Loss 계산에는 raw_logits 사용
+            logits_sequence.append(logits)  # 마스킹된 logits 사용!
             attention_weights_list.append(attn_weights)
             
             if training and teacher_route is not None and torch.rand(1).item() < teacher_forcing_ratio:

@@ -74,9 +74,14 @@ class Trainer:
         total_time_mae = 0
         num_batches = 0
         
-        # Teacher forcing ratio (더 느리게 감소)
-        # 초반에는 높게 유지하여 안정적인 학습
-        teacher_forcing_ratio = max(1.0 * (0.99 ** epoch), 0.5)
+        # 🔥 개선된 Teacher forcing 스케줄
+        # - 초반 20 에폭: 100% teacher forcing (안정적 학습)
+        # - 이후 점진적 감소 (Curriculum Learning)
+        if epoch < 20:
+            teacher_forcing_ratio = 1.0
+        else:
+            # 20 에폭 이후부터 천천히 감소 (0.98^(epoch-20))
+            teacher_forcing_ratio = max(1.0 * (0.98 ** (epoch - 20)), 0.3)
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1} [Train]")
         
@@ -330,10 +335,10 @@ def main():
         
         # 학습
         'num_epochs': 100,
-        'learning_rate': 1e-4,
+        'learning_rate': 5e-4,  # 🔥 학습률 상향 (마스킹 수정 후 학습 가능)
         'weight_decay': 1e-5,
         'route_weight': 1.0,
-        'time_weight': 0.01,
+        'time_weight': 0.1,     # 🔥 Time weight 상향 (로그 스케일 적용됨)
         'label_smoothing': 0.1,
         
         # 스케줄러
