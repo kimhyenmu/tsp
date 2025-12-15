@@ -160,21 +160,25 @@ class PointerDecoder(nn.Module):
             lstm_out, hidden_state = self.lstm(current_input.unsqueeze(1), hidden_state)
             decoder_state = lstm_out.squeeze(1)
             
-            # 🔥 수정: 마스킹된 logits를 Loss 계산에도 사용!
-            # 이미 방문한 노드는 -inf로 처리되어 softmax 후 0에 가까워짐
-            # 이렇게 해야 모델이 "방문한 노드를 피해야 한다"는 것을 학습함
-            logits, attn_weights = self.pointer_attention(decoder_state, encoder_output, mask)
-            logits_sequence.append(logits)  # 마스킹된 logits 사용!
+            # 🔥 핵심 수정: Loss 계산용과 노드 선택용 logits 분리
+            # 1. raw_logits: 마스킹 없음 (Loss 계산용 - 모든 노드에 대한 확률 학습)
+            # 2. masked_logits: 마스킹 적용 (노드 선택용 - 중복 방문 방지)
+            raw_logits, _ = self.pointer_attention(decoder_state, encoder_output, mask=None)
+            masked_logits, attn_weights = self.pointer_attention(decoder_state, encoder_output, mask)
+            
+            # Loss 계산에는 raw_logits 사용 (Validation에서도 안정적)
+            logits_sequence.append(raw_logits)
             attention_weights_list.append(attn_weights)
             
             if training and teacher_route is not None and torch.rand(1).item() < teacher_forcing_ratio:
                 next_node_idx = teacher_route[:, step + 1]
             else:
+                # 🔥 노드 선택에는 masked_logits 사용 (중복 방문 방지)
                 if training:
-                    probs = F.softmax(logits / 1.0, dim=-1)
+                    probs = F.softmax(masked_logits / 1.0, dim=-1)
                     next_node_idx = torch.multinomial(probs, 1).squeeze(-1)
                 else:
-                    next_node_idx = logits.argmax(dim=-1)
+                    next_node_idx = masked_logits.argmax(dim=-1)
             
             routes.append(next_node_idx)
             
