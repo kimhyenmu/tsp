@@ -258,6 +258,10 @@ def overfit_test(
     
     # 모델 초기화
     print("\n🧠 모델 초기화...")
+    
+    # 🔥🔥🔥 GNN Bypass 모드 (True = GNN 끄고 단순 Linear만 사용)
+    BYPASS_GNN = True  # ⬅️ True: GNN 비활성화, False: GNN 사용
+    
     model = HybridRoutingModel(
         node_dim=2,
         hidden_dim=128,
@@ -268,8 +272,14 @@ def overfit_test(
         tf_ff_dim=512,
         pointer_heads=4,
         dropout=0.0,  # 🔥 과적합 테스트에서는 dropout=0
-        k_neighbors=10
+        k_neighbors=10,
+        bypass_gnn=BYPASS_GNN  # 🔥 GNN Bypass 설정
     ).to(device)
+    
+    if BYPASS_GNN:
+        print("   ⚠️ GNN BYPASS 모드 활성화! (단순 Linear Embedding만 사용)")
+    else:
+        print("   ✅ GNN 모드 활성화")
     
     # 🔥 Xavier 초기화 강제 적용
     print("   - Xavier 초기화 적용 중...")
@@ -297,37 +307,32 @@ def overfit_test(
     
     model.train()
     
-    # 🔥 초기 Gradient 흐름 테스트 + GNN 출력 확인
-    print("\n🔍 초기 Gradient 흐름 테스트...")
+    # 🔥 디버깅: Encoder 출력 확인 (핵심!)
+    print("\n🔍 Encoder 출력 디버깅...")
     optimizer.zero_grad()
-    test_pred = model(batch, training=True, teacher_forcing_ratio=1.0)
+    
+    # debug=True로 forward 호출하여 임베딩 값 출력
+    test_pred = model(batch, training=True, teacher_forcing_ratio=1.0, debug=True)
+    
     test_targets = {'actual_route': batch['actual_route'], 'actual_times': batch['actual_times']}
     test_loss = compute_loss_detailed(test_pred, test_targets, batch['num_nodes'], device)
     test_loss['total_loss'].backward()
     
     grad_info, module_grads = check_gradients(model, verbose=True)
-    gnn_grads = module_grads.get('gnn_encoder', [])
-    if gnn_grads and sum(gnn_grads) > 0:
-        print("✅ GNN Gradient 흐름 확인됨")
-    else:
-        print("❌ GNN Gradient 없음 - 구조적 문제!")
     
-    # 🔥 GNN 출력 통계 확인
-    print("\n📊 GNN 출력 통계:")
-    with torch.no_grad():
-        # 간단히 첫 번째 샘플의 GNN 출력 확인
-        n = batch['num_nodes'][0]
-        coords = batch['node_features'][0, :n, :]
-        from model.gnn import build_fully_connected_graph
-        edge_index = build_fully_connected_graph(coords)
-        print(f"   - 노드 수: {n}, 엣지 수: {edge_index.size(1)}")
-        print(f"   - 완전 연결 여부: {edge_index.size(1) == n * (n - 1)}")
-        
-        gnn_out = model.gnn_encoder(coords, edge_index)
-        print(f"   - GNN 출력 shape: {gnn_out.shape}")
-        print(f"   - GNN 출력 mean: {gnn_out.mean().item():.4f}")
-        print(f"   - GNN 출력 std: {gnn_out.std().item():.4f}")
-        print(f"   - GNN 출력 min/max: {gnn_out.min().item():.4f} / {gnn_out.max().item():.4f}")
+    # Bypass 모드면 simple_embedding gradient 확인
+    if BYPASS_GNN:
+        simple_grads = [v['norm'] for k, v in grad_info.items() if 'simple_embedding' in k]
+        if simple_grads and sum(simple_grads) > 0:
+            print("✅ Simple Embedding Gradient 흐름 확인됨")
+        else:
+            print("❌ Simple Embedding Gradient 없음!")
+    else:
+        gnn_grads = module_grads.get('gnn_encoder', [])
+        if gnn_grads and sum(gnn_grads) > 0:
+            print("✅ GNN Gradient 흐름 확인됨")
+        else:
+            print("❌ GNN Gradient 없음!")
     
     optimizer.zero_grad()  # 테스트 후 초기화
     
@@ -335,7 +340,8 @@ def overfit_test(
         optimizer.zero_grad()
         
         # 🔥 Forward (Teacher Forcing 100% 강제)
-        predictions = model(batch, training=True, teacher_forcing_ratio=1.0)
+        # 첫 에폭에서만 debug 출력
+        predictions = model(batch, training=True, teacher_forcing_ratio=1.0, debug=(epoch == 0))
         
         # Loss 계산
         targets = {
