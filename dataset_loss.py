@@ -156,10 +156,12 @@ class HybridLoss(nn.Module):
                 # CrossEntropy가 올바르게 계산되도록 함
                 # (마스킹된 노드는 softmax 후 거의 0이 됨)
                 
+                # 🔥 Label smoothing은 마스킹과 충돌할 수 있으므로 비활성화
+                # 마스킹된 위치(-100)에도 smoothing이 적용되면 Loss 증가
                 step_loss = F.cross_entropy(
                     step_logits.unsqueeze(0), 
                     target.unsqueeze(0),
-                    label_smoothing=self.smoothing  # 이제 label smoothing 사용 가능
+                    label_smoothing=0.0  # 마스킹 사용 시 label_smoothing=0 권장
                 )
                 
                 route_loss += step_loss
@@ -180,39 +182,35 @@ class HybridLoss(nn.Module):
             route_accuracy = 0
 
         # 🔥 개선된 Time Loss
-        # - 로그 스케일 적용으로 큰 값과 작은 값의 균형 맞춤
-        # - Huber Loss로 이상치에 강건하게
-        time_loss_val = torch.tensor(0.0, device=logits.device)
-        time_mae_val = torch.tensor(0.0, device=logits.device)
-        total_time_predictions = 0
+        time_losses = []
+        time_maes = []
 
         for b in range(batch_size):
             n = num_nodes_list[b]
             pred = predicted_times[b, :n-1]
             target = actual_times[b, :n-1]
             
-            # 음수 방지
-            pred = torch.clamp(pred, min=1.0)
-            target = torch.clamp(target, min=1.0)
+            # 음수 방지 및 안정화
+            pred = torch.clamp(pred, min=1.0, max=10000.0)
+            target = torch.clamp(target, min=1.0, max=10000.0)
             
             # 🔥 로그 스케일 변환 (큰 값의 영향력 감소)
-            # log(시간)으로 변환하면 100초와 1000초의 차이가 선형적으로 됨
-            pred_log = torch.log(pred + 1.0)
-            target_log = torch.log(target + 1.0)
+            pred_log = torch.log1p(pred)  # log(1+x)로 수치 안정성 향상
+            target_log = torch.log1p(target)
             
             # Huber Loss (Smooth L1) 적용
             loss_val = F.smooth_l1_loss(pred_log, target_log)
-            
-            time_loss_val = time_loss_val + loss_val
-            time_mae_val = time_mae_val + F.l1_loss(pred, target)
-            total_time_predictions += 1
+            time_losses.append(loss_val)
+            time_maes.append(F.l1_loss(pred, target))
 
-        if total_time_predictions > 0:
-            time_loss_val = time_loss_val / total_time_predictions
-            time_mae_val = time_mae_val / total_time_predictions
+        if len(time_losses) > 0:
+            time_loss_val = torch.stack(time_losses).mean()
+            time_mae_val = torch.stack(time_maes).mean()
+        else:
+            time_loss_val = torch.tensor(0.0, device=logits.device)
+            time_mae_val = torch.tensor(0.0, device=logits.device)
 
         # 🔥 Loss 스케일 조정
-        # Route Loss와 Time Loss의 스케일을 맞춤
         total_loss = self.route_weight * route_loss + self.time_weight * time_loss_val
 
         return {

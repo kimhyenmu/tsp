@@ -32,10 +32,10 @@ class PointerAttention(nn.Module):
         logits = logits * self.scale
         
         if mask is not None:
-            # 🔥 마스킹 값을 충분히 크게 설정
-            # -inf 대신 -1e9 사용 (수치 안정성)
-            # 이 값은 softmax 후 거의 0이 됨
-            logits = logits.masked_fill(mask.bool(), -1e9)
+            # 🔥 마스킹 값을 적절히 설정 (-100)
+            # -1e9는 label_smoothing과 충돌하여 Loss 폭발!
+            # -100이면 softmax 후 거의 0이 되면서도 수치적으로 안정
+            logits = logits.masked_fill(mask.bool(), -100.0)
         
         attention_weights = F.softmax(logits, dim=-1)
         

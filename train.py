@@ -335,11 +335,11 @@ def main():
         
         # 학습
         'num_epochs': 100,
-        'learning_rate': 5e-4,  # 🔥 학습률 상향 (마스킹 수정 후 학습 가능)
+        'learning_rate': 3e-4,  # 🔥 안정적인 학습률
         'weight_decay': 1e-5,
         'route_weight': 1.0,
-        'time_weight': 0.1,     # 🔥 Time weight 상향 (로그 스케일 적용됨)
-        'label_smoothing': 0.1,
+        'time_weight': 0.05,    # 🔥 Time weight (로그 스케일 기준)
+        'label_smoothing': 0.0, # 🔥 마스킹과 충돌 방지
         
         # 스케줄러
         'scheduler_type': 'plateau',  # 'plateau' or 'cosine'
