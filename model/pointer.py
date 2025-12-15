@@ -6,9 +6,9 @@ from datetime import timedelta
 
 class PointerAttention(nn.Module):
     """
-    🔥 개선된 Pointer Attention
-    - Scaled Dot-Product 방식으로 변경 (더 안정적인 gradient)
-    - Bahdanau Attention과 Dot-Product Attention 결합
+    🔥 Softmax Saturation 방지를 위한 Pointer Attention
+    - 필수 Scaling: sqrt(hidden_dim)
+    - Tanh Clipping: logits를 -10 ~ +10 범위로 제한
     """
     def __init__(self, hidden_dim, num_heads=1):
         super().__init__()
@@ -16,21 +16,18 @@ class PointerAttention(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         
-        # Query, Key, Value projections
+        # Query, Key projections
         self.W_query = nn.Linear(hidden_dim, hidden_dim)
         self.W_key = nn.Linear(hidden_dim, hidden_dim)
         
-        # 🔥 Attention scale (학습 가능)
-        self.scale = nn.Parameter(torch.tensor(1.0 / math.sqrt(hidden_dim)))
-        
-        # 🔥 Temperature (logits 범위 조절)
-        self.temperature = nn.Parameter(torch.tensor(1.0))
+        # 🔥 고정된 Scaling factor (학습 불가)
+        self.scale = 1.0 / math.sqrt(hidden_dim)
         
     def forward(self, query, ref, mask=None):
         """
         Args:
             query: (batch, hidden_dim) - decoder state
-            ref: (batch, num_nodes, hidden_dim) - encoder outputs (GNN 출력)
+            ref: (batch, num_nodes, hidden_dim) - encoder outputs
             mask: (batch, num_nodes) - 방문한 노드 마스크
         
         Returns:
@@ -41,22 +38,24 @@ class PointerAttention(nn.Module):
         q = self.W_query(query)  # (batch, hidden_dim)
         k = self.W_key(ref)       # (batch, num_nodes, hidden_dim)
         
-        # 🔥 Scaled Dot-Product Attention
-        # logits = (q @ k^T) / sqrt(d)
+        # 🔥 [수정 1] Scaled Dot-Product Attention
+        # scores = (Q @ K^T) / sqrt(d_k)
         q = q.unsqueeze(1)  # (batch, 1, hidden_dim)
-        logits = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
-        logits = logits.squeeze(1)  # (batch, num_nodes)
+        scores = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
+        scores = scores.squeeze(1)  # (batch, num_nodes)
+        scores = scores * self.scale  # 🔥 sqrt(hidden_dim)으로 나누기
         
-        # 🔥 Scale 적용 (학습 가능한 temperature)
-        logits = logits * torch.abs(self.scale) * torch.clamp(self.temperature, min=0.1, max=10.0)
+        # 🔥 [수정 2] Tanh Clipping - Logits를 -10 ~ +10 범위로 강제 제한
+        # 이렇게 하면 Softmax Saturation을 물리적으로 방지
+        scores = 10.0 * torch.tanh(scores)
         
-        # 마스킹
+        # 마스킹 (방문한 노드는 선택 불가)
         if mask is not None:
-            logits = logits.masked_fill(mask.bool(), -100.0)
+            scores = scores.masked_fill(mask.bool(), -100.0)
         
-        attention_weights = F.softmax(logits, dim=-1)
+        attention_weights = F.softmax(scores, dim=-1)
         
-        return logits, attention_weights
+        return scores, attention_weights
 
 
 class TimePredictor(nn.Module):
