@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # 🔥 추가
+import torch.nn.functional as F
 from torch_geometric.nn import knn_graph
 from .gnn import GraphEncoder
 from .transform import ContextEncoder
-from .pointer import PointerDecoder
+from .pointer import PointerDecoder, log_tensor_stats
 from .gnn import build_knn_graph_manual, build_fully_connected_graph 
 class HybridRoutingModel(nn.Module):
     def __init__(
@@ -73,48 +73,42 @@ class HybridRoutingModel(nn.Module):
         # ============================================================
         if self.bypass_gnn:
             # 🔥🔥🔥 [최종 처방] ID Embedding 사용!
-            # 좌표를 무시하고, 노드 인덱스(0, 1, 2, ...)로 임베딩
             
-            # 노드 ID 생성: [0, 1, 2, ..., max_nodes-1]
-            node_ids = torch.arange(max_nodes, device=device)  # (max_nodes,)
-            node_ids = node_ids.unsqueeze(0).expand(batch_size, -1)  # (batch, max_nodes)
+            # 노드 ID 생성
+            node_ids = torch.arange(max_nodes, device=device)
+            node_ids = node_ids.unsqueeze(0).expand(batch_size, -1)
             
-            # ID Embedding (각 노드가 완전히 다른 벡터!)
-            id_emb = self.node_embedding(node_ids)  # (batch, max_nodes, hidden)
+            # ID Embedding
+            id_emb = self.node_embedding(node_ids)
             
-            # 좌표 정보도 더해줌 (위치 구분에 도움)
-            coord_emb = self.coord_proj(node_features)  # (batch, max_nodes, hidden)
+            # 좌표 임베딩
+            coord_emb = self.coord_proj(node_features)
             
-            # 🔥 ID 임베딩 + 좌표 임베딩 결합
+            # 결합
             gnn_features = id_emb + coord_emb
             
+            # ============================================================
+            # 🔬 CT Scan Point (1): Embedding 직후
+            # ============================================================
             if debug:
                 print("\n" + "="*60)
-                print("🔍 [DEBUG] GNN BYPASS + ID Embedding 모드")
+                print("🔬 CT SCAN Point (1): Embedding 직후")
                 print("="*60)
-                print(f"노드 ID shape: {node_ids.shape}")
-                print(f"ID 임베딩 shape: {id_emb.shape}")
-                print(f"좌표 임베딩 shape: {coord_emb.shape}")
-                print(f"최종 임베딩 shape: {gnn_features.shape}")
+                log_tensor_stats("입력 좌표 (node_features)", node_features, indent=1)
+                log_tensor_stats("ID Embedding", id_emb, indent=1)
+                log_tensor_stats("Coord Embedding", coord_emb, indent=1)
+                log_tensor_stats("결합 (id + coord)", gnn_features, indent=1)
                 
-                # 🔥 핵심: 각 노드의 임베딩이 다른지 확인
-                print("\n📊 노드별 임베딩 값 (첫 번째 샘플):")
+                # 노드 간 차이 확인
                 n = num_nodes_list[0]
-                for i in range(min(5, n)):
-                    emb = gnn_features[0, i, :5].detach().cpu().numpy()
-                    id_val = node_ids[0, i].item()
-                    coord = node_features[0, i].detach().cpu().numpy()
-                    print(f"   노드 {i} (ID={id_val}): 좌표={coord}, 임베딩={emb}...")
-                
-                # 노드 간 임베딩 차이 확인
                 if n >= 2:
                     diff = (gnn_features[0, 0] - gnn_features[0, 1]).abs().mean().item()
-                    print(f"\n🔥 노드0 vs 노드1 임베딩 차이: {diff:.6f}")
-                    if diff < 0.1:
-                        print("   ⚠️ 경고: 임베딩 차이가 작음!")
+                    print(f"   🔥 노드0 vs 노드1 차이: {diff:.6f}")
+                    if diff < 0.01:
+                        print("   ❌ 차이가 너무 작음!")
                     else:
-                        print("   ✅ 임베딩이 충분히 다름! (목표 달성)")
-                print("="*60 + "\n")
+                        print("   ✅ 차이가 충분함!")
+                print("="*60)
         else:
             # ============================================================
             # 🔥 원래 GNN 처리 (완전 연결 그래프 사용)
@@ -158,6 +152,22 @@ class HybridRoutingModel(nn.Module):
             batch['day_of_week'],
             batch['traffic_profile']
         )
+        
+        # ============================================================
+        # 🔬 CT Scan Point (2): Encoder 출력 (Decoder 입력 전)
+        # ============================================================
+        if debug:
+            print("\n" + "="*60)
+            print("🔬 CT SCAN Point (2): Encoder 출력")
+            print("="*60)
+            log_tensor_stats("Context Features (encoder out)", context_features, indent=1)
+            
+            # 노드 간 차이 확인
+            n = num_nodes_list[0]
+            if n >= 2:
+                diff = (context_features[0, 0] - context_features[0, 1]).abs().mean().item()
+                print(f"   🔥 노드0 vs 노드1 차이: {diff:.6f}")
+            print("="*60)
         
         # Pointer
         teacher_route = batch.get('actual_route', None) if training else None

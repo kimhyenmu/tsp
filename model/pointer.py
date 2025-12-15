@@ -5,6 +5,47 @@ import math
 
 
 ###############################################################################
+# 🔬 CT Scan 모드: 텐서 통계 출력 헬퍼 함수
+###############################################################################
+
+def log_tensor_stats(name, tensor, indent=0):
+    """
+    텐서의 통계치를 출력하는 헬퍼 함수
+    NaN/Inf 감지 시 경고 출력
+    """
+    prefix = "   " * indent
+    
+    # detach하고 float으로 변환
+    t = tensor.detach().float()
+    
+    # NaN/Inf 체크
+    has_nan = torch.isnan(t).any().item()
+    has_inf = torch.isinf(t).any().item()
+    
+    if has_nan:
+        print(f"{prefix}🚨 [{name}] NaN Detected!")
+        return
+    if has_inf:
+        print(f"{prefix}🚨 [{name}] Inf Detected!")
+        return
+    
+    # 통계 계산
+    t_min = t.min().item()
+    t_max = t.max().item()
+    t_mean = t.mean().item()
+    t_std = t.std().item()
+    
+    # 경고 조건
+    warning = ""
+    if abs(t_max) > 100 or abs(t_min) > 100:
+        warning = " ⚠️ 값이 큼!"
+    elif t_std < 1e-6:
+        warning = " ⚠️ std가 0에 가까움!"
+    
+    print(f"{prefix}📊 [{name}] min:{t_min:+.4f}, max:{t_max:+.4f}, mean:{t_mean:+.4f}, std:{t_std:.4f}{warning}")
+
+
+###############################################################################
 # 🔥 완전히 새로 작성된 Pointer Network (Bahdanau Attention + Glimpse)
 ###############################################################################
 
@@ -42,54 +83,67 @@ class Attention(nn.Module):
         """
         batch_size, num_nodes, _ = keys.shape
         
-        # [1] Query, Key 변환
+        # ============================================================
+        # 🔬 CT Scan Point (3): Query, Key 생성 직후
+        # ============================================================
         q = self.W_query(query)  # (batch, hidden_dim)
         k = self.W_key(keys)      # (batch, num_nodes, hidden_dim)
         
-        # [2] Pure Dot-Product: score = Q @ K^T
-        q = q.unsqueeze(1)  # (batch, 1, hidden)
-        score = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
-        score = score.squeeze(1)  # (batch, num_nodes)
-        
-        # [3] Scaling: 1 / sqrt(d) - NaN 방지 핵심!
-        logits = score / math.sqrt(self.hidden_dim)
-        
-        # 🔥 [추가] 값 범위 제한 (Overflow 방지)
-        # logits가 너무 크면 exp()에서 inf가 되어 NaN 발생
-        logits = torch.clamp(logits, min=-50.0, max=50.0)
-        
-        # 🔥 디버깅: 마스킹 전 score 분포 출력
-        if debug and not self.debug_printed:
-            self.debug_printed = True
+        if debug:
             print("\n" + "="*60)
-            print("🔍 [DEBUG] Pure Attention Score (마스킹 전)")
+            print("🔬 CT SCAN: Attention 내부")
             print("="*60)
-            print(f"Score shape: {logits.shape}")
-            print(f"Score 샘플0, 노드 0~4: {logits[0, :5].detach().cpu().numpy()}")
-            print(f"Score min: {logits[0].min().item():.6f}")
-            print(f"Score max: {logits[0].max().item():.6f}")
-            print(f"Score mean: {logits[0].mean().item():.6f}")
-            print(f"Score std: {logits[0].std().item():.6f}")
-            
-            # 값이 너무 큰지 체크
-            if abs(logits[0].max().item()) > 30:
-                print("⚠️ 경고: Score 값이 큼! Overflow 위험")
-            
-            # 모든 값이 같은지 체크
-            if logits[0].std().item() < 1e-5:
-                print("❌ 경고: 모든 Score가 거의 동일함!")
-            else:
-                print("✅ Score에 다양성 있음!")
-            print("="*60 + "\n")
+            log_tensor_stats("Query (W_q @ h)", q, indent=1)
+            log_tensor_stats("Key (W_k @ enc)", k, indent=1)
         
-        # [4] Masking: 방문한 노드는 -inf
+        # ============================================================
+        # 🔬 CT Scan Point (4): Attention Score (Scaling 전/후)
+        # ============================================================
+        q = q.unsqueeze(1)  # (batch, 1, hidden)
+        score_raw = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
+        score_raw = score_raw.squeeze(1)  # (batch, num_nodes)
+        
+        if debug:
+            log_tensor_stats("Score (Q@K^T) - Scaling 전", score_raw, indent=1)
+        
+        # Scaling: 1 / sqrt(d)
+        score_scaled = score_raw / math.sqrt(self.hidden_dim)
+        
+        if debug:
+            log_tensor_stats("Score (Q@K^T/√d) - Scaling 후", score_scaled, indent=1)
+        
+        # 값 범위 제한 (Overflow 방지)
+        logits = torch.clamp(score_scaled, min=-50.0, max=50.0)
+        
+        if debug:
+            log_tensor_stats("Logits (clamp 후)", logits, indent=1)
+        
+        # Masking
         if mask is not None:
             logits = logits.masked_fill(mask.bool(), float('-inf'))
         
-        # [5] 🔥 안전한 Softmax (Numerical Stability)
-        # max를 빼서 overflow 방지
+        # ============================================================
+        # 🔬 CT Scan Point (5): Softmax 직후
+        # ============================================================
+        # 안전한 Softmax (max를 빼서 overflow 방지)
         logits_stable = logits - logits.max(dim=-1, keepdim=True)[0]
         probs = F.softmax(logits_stable, dim=-1)
+        
+        if debug:
+            log_tensor_stats("Probs (softmax 후)", probs, indent=1)
+            
+            # 분포 분석
+            max_prob = probs[0].max().item()
+            uniform_prob = 1.0 / num_nodes
+            print(f"   📈 Probs max: {max_prob:.4f} (uniform={uniform_prob:.4f})")
+            
+            if max_prob < uniform_prob * 1.5:
+                print("   ❌ Softmax가 Uniform! → Attention 실패")
+            elif max_prob > 0.5:
+                print("   ✅ Softmax가 뾰족함! → Attention 성공")
+            else:
+                print("   ⚠️ Softmax가 약간 뾰족함")
+            print("="*60)
         
         return logits, probs
 
@@ -211,11 +265,26 @@ class PointerDecoder(nn.Module):
             # [Step 1] LSTM으로 hidden state 업데이트
             h, c = self.lstm(current_input, (h, c))
             
-            # [Step 2] Glimpse로 context 생성 (encoder outputs 참조)
+            # 🔬 CT Scan: LSTM 출력 (첫 스텝만)
+            if debug and step == 0:
+                print("\n" + "="*60)
+                print("🔬 CT SCAN: Decoder 내부 (Step 0)")
+                print("="*60)
+                log_tensor_stats("LSTM Input", current_input, indent=1)
+                log_tensor_stats("LSTM Hidden (h)", h, indent=1)
+            
+            # [Step 2] Glimpse로 context 생성
             context, glimpse_attn = self.glimpse(h, encoder_output, mask, debug=(debug and step==0))
+            
+            if debug and step == 0:
+                log_tensor_stats("Glimpse Context", context, indent=1)
             
             # [Step 3] Hidden과 Context 결합
             query = self.hidden_out(torch.cat([h, context], dim=-1))
+            
+            if debug and step == 0:
+                log_tensor_stats("Query (h + context)", query, indent=1)
+                print("="*60)
             
             # [Step 4] Pointer Attention으로 노드 선택
             logits, probs = self.pointer(query, encoder_output, mask, debug=(debug and step==0))
