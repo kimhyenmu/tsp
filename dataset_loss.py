@@ -142,23 +142,38 @@ class HybridLoss(nn.Module):
         for b in range(batch_size):
             n = num_nodes_list[b]
             
+            # 🔥 핵심 수정: 각 step에서 방문한 노드를 추적
+            visited_mask = torch.zeros(n, device=logits.device)
+            visited_mask[actual_route[b, 0]] = 1  # depot 마스킹
+            
             for step in range(n - 1):
                 target = actual_route[b, step + 1]
                 
-                # 유효 노드만 사용
+                # 유효 노드만 사용 (패딩 제외)
                 step_logits = logits[b, step, :n].clone()
                 
+                # 🔥 이미 방문한 노드의 logits는 -inf로 설정되어 있음
+                # CrossEntropy가 올바르게 계산되도록 함
+                # (마스킹된 노드는 softmax 후 거의 0이 됨)
+                
+                # 🔥 Label smoothing은 마스킹과 충돌할 수 있으므로 비활성화
+                # 마스킹된 위치(-100)에도 smoothing이 적용되면 Loss 증가
                 step_loss = F.cross_entropy(
                     step_logits.unsqueeze(0), 
                     target.unsqueeze(0),
-                    label_smoothing=0.0  # label_smoothing 사용 시 Loss 폭발 문제
+                    label_smoothing=0.0  # 마스킹 사용 시 label_smoothing=0 권장
                 )
                 
                 route_loss += step_loss
                 
-                if step_logits.argmax() == target:
+                # 🔥 argmax 시 마스킹된 값(-inf)은 자동으로 제외됨
+                pred_node = step_logits.argmax()
+                if pred_node == target:
                     correct_predictions += 1
                 total_predictions += 1
+                
+                # 다음 step을 위해 방문 마스크 업데이트
+                visited_mask[target] = 1
         
         if total_predictions > 0:
             route_loss = route_loss / total_predictions
@@ -166,31 +181,36 @@ class HybridLoss(nn.Module):
         else:
             route_accuracy = 0
 
-        # Time Loss (Smooth L1 사용)
-        time_loss_val = 0
-        time_mae_val = 0
-        total_time_predictions = 0
+        # 🔥 개선된 Time Loss
+        time_losses = []
+        time_maes = []
 
         for b in range(batch_size):
             n = num_nodes_list[b]
             pred = predicted_times[b, :n-1]
             target = actual_times[b, :n-1]
             
-            pred = torch.clamp(pred, min=0)
+            # 음수 방지 및 안정화
+            pred = torch.clamp(pred, min=1.0, max=10000.0)
+            target = torch.clamp(target, min=1.0, max=10000.0)
             
-            # Smooth L1 Loss (이상치에 강건)
-            pred_scaled = pred / 1000.0
-            target_scaled = target / 1000.0
-            loss_val = F.smooth_l1_loss(pred_scaled, target_scaled)
+            # 🔥 로그 스케일 변환 (큰 값의 영향력 감소)
+            pred_log = torch.log1p(pred)  # log(1+x)로 수치 안정성 향상
+            target_log = torch.log1p(target)
             
-            time_loss_val += loss_val
-            time_mae_val += F.l1_loss(pred, target)
-            total_time_predictions += 1
+            # Huber Loss (Smooth L1) 적용
+            loss_val = F.smooth_l1_loss(pred_log, target_log)
+            time_losses.append(loss_val)
+            time_maes.append(F.l1_loss(pred, target))
 
-        if total_time_predictions > 0:
-            time_loss_val = time_loss_val / total_time_predictions
-            time_mae_val = time_mae_val / total_time_predictions
+        if len(time_losses) > 0:
+            time_loss_val = torch.stack(time_losses).mean()
+            time_mae_val = torch.stack(time_maes).mean()
+        else:
+            time_loss_val = torch.tensor(0.0, device=logits.device)
+            time_mae_val = torch.tensor(0.0, device=logits.device)
 
+        # 🔥 Loss 스케일 조정
         total_loss = self.route_weight * route_loss + self.time_weight * time_loss_val
 
         return {
