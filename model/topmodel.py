@@ -78,11 +78,11 @@ class HybridRoutingModel(nn.Module):
             node_ids = torch.arange(max_nodes, device=device)
             node_ids = node_ids.unsqueeze(0).expand(batch_size, -1)
             
-            # ID Embedding
-            id_emb = self.node_embedding(node_ids)
+            # 🔥🔥🔥 ID Embedding × 10 (Signal Boosting!)
+            id_emb = self.node_embedding(node_ids) * 10.0
             
-            # 좌표 임베딩
-            coord_emb = self.coord_proj(node_features)
+            # 🔥 좌표 임베딩도 10배
+            coord_emb = self.coord_proj(node_features) * 10.0
             
             # 결합
             gnn_features = id_emb + coord_emb

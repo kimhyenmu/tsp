@@ -106,11 +106,13 @@ class Attention(nn.Module):
         if debug:
             log_tensor_stats("Score (Q@K^T) - Scaling 전", score_raw, indent=1)
         
-        # Scaling: 1 / sqrt(d)
-        score_scaled = score_raw / math.sqrt(self.hidden_dim)
+        # 🔥🔥🔥 Scaling + Temperature 10.0 (Softmax를 뾰족하게!)
+        # 기존: score / sqrt(d) → 값이 너무 작아서 Uniform
+        # 수정: score / sqrt(d) * 10.0 → 값을 키워서 Peaky!
+        score_scaled = score_raw / math.sqrt(self.hidden_dim) * 10.0
         
         if debug:
-            log_tensor_stats("Score (Q@K^T/√d) - Scaling 후", score_scaled, indent=1)
+            log_tensor_stats("Score (Q@K^T/√d × 10) - Temp 적용", score_scaled, indent=1)
         
         # 값 범위 제한 (Overflow 방지)
         logits = torch.clamp(score_scaled, min=-50.0, max=50.0)
