@@ -27,12 +27,14 @@ class HybridRoutingModel(nn.Module):
         self.k_neighbors = k_neighbors
         self.bypass_gnn = bypass_gnn  # 🔥 저장
         
-        # 🔥 단순 Linear Embedding (GNN Bypass 시 사용)
-        # bias=False로 편향이 차이를 덮는 것 방지!
-        self.simple_embedding = nn.Linear(node_dim, hidden_dim, bias=False)
+        # 🔥🔥🔥 [최종 처방] ID Embedding 사용!
+        # 좌표(continuous) 대신 노드 ID(discrete)로 임베딩
+        # 각 노드가 완전히 다른 벡터를 가지게 됨
+        MAX_NODES = 200  # 최대 노드 수
+        self.node_embedding = nn.Embedding(MAX_NODES, hidden_dim)
         
-        # 🔥 가중치를 크게 초기화 (gain=10)
-        nn.init.xavier_uniform_(self.simple_embedding.weight, gain=10.0)
+        # 좌표 정보도 추가로 사용 (옵션)
+        self.coord_proj = nn.Linear(node_dim, hidden_dim, bias=False)
         
         self.gnn_encoder = GraphEncoder(
             node_dim=node_dim,
@@ -67,33 +69,48 @@ class HybridRoutingModel(nn.Module):
         # 🔥 GNN Bypass 모드: 단순 Linear Embedding만 사용
         # ============================================================
         if self.bypass_gnn:
-            # 🔥 좌표를 직접 Linear로 임베딩 (GNN 없이, bias 없음!)
-            gnn_features = self.simple_embedding(node_features)  # (batch, max_nodes, hidden)
-            # LayerNorm이나 활성화 함수 없이 순수하게 Linear만!
+            # 🔥🔥🔥 [최종 처방] ID Embedding 사용!
+            # 좌표를 무시하고, 노드 인덱스(0, 1, 2, ...)로 임베딩
+            
+            # 노드 ID 생성: [0, 1, 2, ..., max_nodes-1]
+            node_ids = torch.arange(max_nodes, device=device)  # (max_nodes,)
+            node_ids = node_ids.unsqueeze(0).expand(batch_size, -1)  # (batch, max_nodes)
+            
+            # ID Embedding (각 노드가 완전히 다른 벡터!)
+            id_emb = self.node_embedding(node_ids)  # (batch, max_nodes, hidden)
+            
+            # 좌표 정보도 더해줌 (위치 구분에 도움)
+            coord_emb = self.coord_proj(node_features)  # (batch, max_nodes, hidden)
+            
+            # 🔥 ID 임베딩 + 좌표 임베딩 결합
+            gnn_features = id_emb + coord_emb
             
             if debug:
                 print("\n" + "="*60)
-                print("🔍 [DEBUG] GNN BYPASS 모드 - 단순 Linear Embedding 사용")
+                print("🔍 [DEBUG] GNN BYPASS + ID Embedding 모드")
                 print("="*60)
-                print(f"입력 좌표 (node_features) shape: {node_features.shape}")
-                print(f"임베딩 출력 shape: {gnn_features.shape}")
+                print(f"노드 ID shape: {node_ids.shape}")
+                print(f"ID 임베딩 shape: {id_emb.shape}")
+                print(f"좌표 임베딩 shape: {coord_emb.shape}")
+                print(f"최종 임베딩 shape: {gnn_features.shape}")
                 
                 # 🔥 핵심: 각 노드의 임베딩이 다른지 확인
                 print("\n📊 노드별 임베딩 값 (첫 번째 샘플):")
                 n = num_nodes_list[0]
                 for i in range(min(5, n)):
                     emb = gnn_features[0, i, :5].detach().cpu().numpy()
+                    id_val = node_ids[0, i].item()
                     coord = node_features[0, i].detach().cpu().numpy()
-                    print(f"   노드 {i}: 좌표={coord}, 임베딩={emb}...")
+                    print(f"   노드 {i} (ID={id_val}): 좌표={coord}, 임베딩={emb}...")
                 
                 # 노드 간 임베딩 차이 확인
                 if n >= 2:
                     diff = (gnn_features[0, 0] - gnn_features[0, 1]).abs().mean().item()
                     print(f"\n🔥 노드0 vs 노드1 임베딩 차이: {diff:.6f}")
-                    if diff < 1e-5:
-                        print("   ❌ 경고: 임베딩이 거의 동일함!")
+                    if diff < 0.1:
+                        print("   ⚠️ 경고: 임베딩 차이가 작음!")
                     else:
-                        print("   ✅ 임베딩이 서로 다름 (정상)")
+                        print("   ✅ 임베딩이 충분히 다름! (목표 달성)")
                 print("="*60 + "\n")
         else:
             # ============================================================

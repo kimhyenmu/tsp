@@ -290,16 +290,22 @@ def overfit_test(
     print("   - Xavier 초기화 적용 중...")
     model.apply(init_weights)
     
-    # 🔥 simple_embedding은 gain=10으로 다시 강제 초기화 (매우 중요!)
+    # 🔥 ID Embedding 확인
     if BYPASS_GNN:
-        print("   - Simple Embedding 가중치 10배 증폭!")
-        nn.init.xavier_uniform_(model.simple_embedding.weight, gain=10.0)
+        print("   - 🆔 ID Embedding 모드 활성화!")
         
-        # 🔥 초기화 후 가중치 통계 출력
-        w = model.simple_embedding.weight
-        print(f"   - 가중치 shape: {w.shape}")
-        print(f"   - 가중치 mean: {w.mean().item():.4f}, std: {w.std().item():.4f}")
-        print(f"   - 가중치 min/max: {w.min().item():.4f} / {w.max().item():.4f}")
+        # Embedding 가중치 통계 출력
+        w = model.node_embedding.weight
+        print(f"   - Node Embedding shape: {w.shape}")
+        print(f"   - Embedding mean: {w.mean().item():.4f}, std: {w.std().item():.4f}")
+        
+        # 노드 0과 1의 임베딩 차이 미리 확인
+        emb0 = w[0]
+        emb1 = w[1]
+        diff = (emb0 - emb1).abs().mean().item()
+        print(f"   - 노드0 vs 노드1 임베딩 차이: {diff:.4f}")
+        if diff > 0.1:
+            print("   ✅ 임베딩 차이 충분! (> 0.1)")
     
     total_params = sum(p.numel() for p in model.parameters())
     print(f"   - 파라미터 수: {total_params:,}")
