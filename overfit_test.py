@@ -132,11 +132,17 @@ def compute_loss_detailed(predictions, targets, num_nodes_list, device):
     }
 
 
-def check_gradients(model):
+def check_gradients(model, verbose=False):
     """
-    Gradient 흐름 확인
+    Gradient 흐름 확인 (상세 버전)
     """
     grad_info = {}
+    module_grads = {
+        'gnn_encoder': [],
+        'context_encoder': [],
+        'pointer_decoder': []
+    }
+    
     for name, param in model.named_parameters():
         if param.grad is not None:
             grad_norm = param.grad.norm().item()
@@ -145,7 +151,27 @@ def check_gradients(model):
                 'has_nan': torch.isnan(param.grad).any().item(),
                 'has_inf': torch.isinf(param.grad).any().item()
             }
-    return grad_info
+            
+            # 모듈별 분류
+            for module_name in module_grads.keys():
+                if module_name in name:
+                    module_grads[module_name].append(grad_norm)
+                    break
+        else:
+            grad_info[name] = {'norm': 0, 'has_nan': False, 'has_inf': False}
+            for module_name in module_grads.keys():
+                if module_name in name:
+                    module_grads[module_name].append(0)
+                    break
+    
+    if verbose:
+        print("\n📊 모듈별 Gradient 평균:")
+        for module_name, norms in module_grads.items():
+            if norms:
+                avg_norm = sum(norms) / len(norms)
+                print(f"   {module_name}: {avg_norm:.6f} (params: {len(norms)})")
+    
+    return grad_info, module_grads
 
 
 def overfit_test(
@@ -244,7 +270,7 @@ def overfit_test(
         
         # Gradient 확인 (첫 에폭과 중간중간)
         if epoch == 0 or (epoch + 1) % 100 == 0:
-            grad_info = check_gradients(model)
+            grad_info, module_grads = check_gradients(model, verbose=(epoch == 0))
             nan_grads = [k for k, v in grad_info.items() if v['has_nan']]
             inf_grads = [k for k, v in grad_info.items() if v['has_inf']]
             zero_grads = [k for k, v in grad_info.items() if v['norm'] < 1e-7]
@@ -254,7 +280,14 @@ def overfit_test(
             if inf_grads:
                 print(f"⚠️ Inf Gradients: {inf_grads}")
             if zero_grads and epoch == 0:
-                print(f"⚠️ Zero Gradients (가능한 gradient 끊김): {zero_grads[:5]}...")
+                print(f"⚠️ Zero Gradients ({len(zero_grads)}개): {zero_grads[:3]}...")
+                
+            # 🔥 GNN gradient 특별 확인
+            gnn_grads = module_grads.get('gnn_encoder', [])
+            if gnn_grads and max(gnn_grads) < 1e-7:
+                print(f"❌ GNN Gradient 끊김 감지! 모든 GNN param의 grad가 0")
+            elif gnn_grads:
+                print(f"✅ GNN Gradient 정상: avg={sum(gnn_grads)/len(gnn_grads):.6f}")
         
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -358,15 +391,24 @@ def overfit_test(
     
     for i in range(min(3, num_samples)):
         n = batch['num_nodes'][i]
+        max_n = batch['actual_route'].size(1)
         actual = batch['actual_route'][i, :n].cpu().numpy()
         predicted = predictions['routes'][i, :n].cpu().numpy()
         
+        # 🔥 패딩 마스킹 검증: 예측값이 유효 범위 내인지 확인
+        invalid_preds = [p for p in predicted if p >= n]
+        
         match = (actual == predicted).sum()
         
-        print(f"\n샘플 {i} (노드 {n}개):")
+        print(f"\n샘플 {i} (유효 노드 {n}개, 패딩 포함 {max_n}개):")
         print(f"   정답 경로:    {actual}")
         print(f"   예측 경로:    {predicted}")
         print(f"   일치율:       {match}/{n} ({match/n*100:.1f}%)")
+        
+        if invalid_preds:
+            print(f"   ❌ 패딩 마스킹 실패! 잘못된 인덱스: {invalid_preds}")
+        else:
+            print(f"   ✅ 패딩 마스킹 정상 (모든 예측이 0~{n-1} 범위)")
     
     return history
 

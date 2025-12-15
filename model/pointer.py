@@ -132,8 +132,9 @@ class PointerDecoder(nn.Module):
         )
         
     def forward(self, encoder_output, node_coords, start_hour, 
+                num_nodes_list=None,  # 🔥 추가: 각 샘플의 유효 노드 수
                 teacher_route=None, teacher_forcing_ratio=0.5, training=True):
-        batch_size, num_nodes, _ = encoder_output.shape
+        batch_size, max_nodes, _ = encoder_output.shape
         device = encoder_output.device
         
         global_context = encoder_output.mean(dim=1)
@@ -144,7 +145,7 @@ class PointerDecoder(nn.Module):
         predicted_times = []
         attention_weights_list = []
         
-        # LSTM hidden state를 global_context로 초기화 (핵심 수정!)
+        # LSTM hidden state를 global_context로 초기화
         h0 = global_context.unsqueeze(0).repeat(2, 1, 1)  # (num_layers=2, batch, hidden)
         c0 = torch.zeros_like(h0)
         hidden_state = (h0, c0)
@@ -153,10 +154,26 @@ class PointerDecoder(nn.Module):
         routes.append(current_node_idx)
         
         current_input = self.start_embedding.expand(batch_size, -1)
-        mask = torch.zeros(batch_size, num_nodes, device=device)
-        mask[:, 0] = 1
         
-        for step in range(num_nodes - 1):
+        # 🔥 핵심 수정: Padding Masking 초기화
+        # 각 샘플의 유효 노드 수를 넘어가는 인덱스는 처음부터 마스킹
+        mask = torch.zeros(batch_size, max_nodes, device=device)
+        mask[:, 0] = 1  # depot 마스킹
+        
+        # 🔥 Padding 노드 마스킹 (유효 노드 수 이상의 인덱스)
+        if num_nodes_list is not None:
+            for b in range(batch_size):
+                n = num_nodes_list[b]
+                if n < max_nodes:
+                    mask[b, n:] = 1  # 패딩 노드들을 마스킹
+        
+        # 🔥 수정: max_nodes가 아닌 가장 긴 시퀀스 기준으로 반복
+        # (배치 내 모든 샘플을 처리해야 하므로 max_nodes - 1 사용)
+        max_steps = max_nodes - 1
+        if num_nodes_list is not None:
+            max_steps = max(num_nodes_list) - 1
+        
+        for step in range(max_steps):
             lstm_out, hidden_state = self.lstm(current_input.unsqueeze(1), hidden_state)
             decoder_state = lstm_out.squeeze(1)
             

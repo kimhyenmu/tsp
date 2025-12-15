@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # 🔥 추가
 from torch_geometric.nn import knn_graph
 from .gnn import GraphEncoder
 from .transform import ContextEncoder
@@ -53,26 +54,32 @@ class HybridRoutingModel(nn.Module):
         device = node_features.device
         num_nodes_list = batch['num_nodes']
         
-        # GNN (패딩 노드 제외하고 처리)
+        # 🔥 GNN 처리 (Gradient 흐름 유지 확인)
         gnn_outputs = []
         for i in range(batch_size):
             n = num_nodes_list[i]
-            coords = node_features[i, :n, :]  # 유효 노드만!
             
-            # k-NN 그래프 (k가 노드 수보다 클 수 없음)
+            # 🔥 유효 노드만 추출 (slicing은 gradient 유지)
+            coords = node_features[i, :n, :]
+            
+            # k-NN 그래프 생성 (이 부분은 gradient 불필요)
             k = min(self.k_neighbors, n - 1)
             edge_index = build_knn_graph_manual(coords, k=k)
             
+            # 🔥 GNN 인코딩 (이 부분에서 gradient 필요!)
             gnn_out = self.gnn_encoder(coords, edge_index)
             
-            # 패딩 추가 (max_nodes 크기로 맞추기)
+            # 🔥 패딩 추가 시 gradient 유지를 위해 F.pad 사용
             if n < max_nodes:
-                padding = torch.zeros(max_nodes - n, self.hidden_dim, device=device)
-                gnn_out = torch.cat([gnn_out, padding], dim=0)
+                # (max_nodes - n, hidden_dim) 크기의 패딩
+                # F.pad는 gradient를 유지함
+                pad_size = max_nodes - n
+                gnn_out = F.pad(gnn_out, (0, 0, 0, pad_size), mode='constant', value=0)
             
             gnn_outputs.append(gnn_out)
         
-        gnn_features = torch.stack(gnn_outputs)
+        # 🔥 stack은 gradient를 유지
+        gnn_features = torch.stack(gnn_outputs, dim=0)
         
         # Transformer
         context_features = self.context_encoder(
@@ -86,10 +93,12 @@ class HybridRoutingModel(nn.Module):
         # Pointer
         teacher_route = batch.get('actual_route', None) if training else None
         
+        # 🔥 num_nodes_list를 전달하여 패딩 마스킹 적용
         routes, logits, predicted_times, attention_weights = self.pointer_decoder(
             encoder_output=context_features,
             node_coords=node_features,
             start_hour=batch['start_hour'],
+            num_nodes_list=num_nodes_list,  # 🔥 추가
             teacher_route=teacher_route,
             teacher_forcing_ratio=teacher_forcing_ratio,
             training=training

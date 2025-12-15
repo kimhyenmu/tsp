@@ -18,22 +18,26 @@ def build_knn_graph_manual(node_features, k=10):
     """
     N = node_features.size(0)
     
-    # 거리 행렬 계산
-    # (N, 1, 2) - (1, N, 2) = (N, N, 2)
-    diff = node_features.unsqueeze(1) - node_features.unsqueeze(0)
-    dist = torch.norm(diff, dim=-1)  # (N, N)
-    
-    # 자기 자신과의 거리를 무한대로
-    dist.fill_diagonal_(float('inf'))
-    
-    # 각 노드별 k개의 가까운 이웃 찾기
-    _, indices = torch.topk(dist, k, dim=1, largest=False)  # (N, k)
-    
-    # edge_index 구성
-    source = torch.arange(N, device=node_features.device).unsqueeze(1).expand(-1, k).reshape(-1)
-    target = indices.reshape(-1)
-    
-    edge_index = torch.stack([source, target], dim=0)  # (2, N*k)
+    # 🔥 수정: detach()를 사용하여 거리 계산은 gradient 그래프에서 분리
+    # edge_index 생성에는 gradient가 필요 없음 (구조만 정의)
+    with torch.no_grad():
+        # 거리 행렬 계산
+        coords = node_features.detach()
+        diff = coords.unsqueeze(1) - coords.unsqueeze(0)
+        dist = torch.norm(diff, dim=-1)  # (N, N)
+        
+        # 자기 자신과의 거리를 무한대로 (in-place 연산 방지)
+        mask = torch.eye(N, device=node_features.device, dtype=torch.bool)
+        dist = dist.masked_fill(mask, float('inf'))
+        
+        # 각 노드별 k개의 가까운 이웃 찾기
+        _, indices = torch.topk(dist, k, dim=1, largest=False)  # (N, k)
+        
+        # edge_index 구성
+        source = torch.arange(N, device=node_features.device).unsqueeze(1).expand(-1, k).reshape(-1)
+        target = indices.reshape(-1)
+        
+        edge_index = torch.stack([source, target], dim=0)  # (2, N*k)
     
     return edge_index
 
