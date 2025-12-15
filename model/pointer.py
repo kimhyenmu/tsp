@@ -10,23 +10,26 @@ import math
 
 class Attention(nn.Module):
     """
-    🔥🔥🔥 Dot-Product Attention + Tanh Boosting
-    - Scaled Dot-Product: (Q @ K^T) / sqrt(d)
-    - Tanh Clipping & 10x Boosting으로 차이 극대화
+    🔥 Pure Scaled Dot-Product Attention (가장 단순한 형태)
+    - tanh, clipping, boosting 전부 제거
+    - 오직 score = (Q @ K^T) / sqrt(d) 만 사용
     """
     def __init__(self, hidden_dim):
         super().__init__()
         self.hidden_dim = hidden_dim
         
-        # Query, Key 변환 (bias 없음!)
+        # Query, Key 변환
         self.W_query = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.W_key = nn.Linear(hidden_dim, hidden_dim, bias=False)
         
-        # 🔥 가중치를 크게 초기화 (차이 증폭)
-        nn.init.xavier_uniform_(self.W_query.weight, gain=2.0)
-        nn.init.xavier_uniform_(self.W_key.weight, gain=2.0)
+        # 표준 Xavier 초기화
+        nn.init.xavier_uniform_(self.W_query.weight)
+        nn.init.xavier_uniform_(self.W_key.weight)
         
-    def forward(self, query, keys, mask=None):
+        # 디버깅용 플래그
+        self.debug_printed = False
+        
+    def forward(self, query, keys, mask=None, debug=False):
         """
         Args:
             query: (batch, hidden_dim) - decoder hidden state
@@ -39,29 +42,43 @@ class Attention(nn.Module):
         """
         batch_size, num_nodes, _ = keys.shape
         
-        # 🔥 [1] Query, Key 변환
+        # [1] Query, Key 변환
         q = self.W_query(query)  # (batch, hidden_dim)
         k = self.W_key(keys)      # (batch, num_nodes, hidden_dim)
         
-        # 🔥 [2] Dot-Product Attention Score
-        # score = Q @ K^T = (batch, hidden) @ (batch, hidden, nodes) = (batch, nodes)
+        # [2] Pure Dot-Product: score = Q @ K^T
         q = q.unsqueeze(1)  # (batch, 1, hidden)
         score = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
         score = score.squeeze(1)  # (batch, num_nodes)
         
-        # 🔥 [3] Scaling: sqrt(hidden_dim)으로 나누기 (먼저!)
-        score = score / math.sqrt(self.hidden_dim)
+        # [3] Scaling: 1 / sqrt(d)
+        logits = score / math.sqrt(self.hidden_dim)
         
-        # 🔥🔥🔥 [4] 핵심: Tanh Clipping & 10x Boosting!
-        # tanh는 값을 -1~1로 정규화, *10은 차이를 극대화
-        # 이렇게 해야 Softmax가 노드를 구분할 수 있음!
-        logits = 10.0 * torch.tanh(score)
+        # 🔥 디버깅: 마스킹 전 score 분포 출력
+        if debug and not self.debug_printed:
+            self.debug_printed = True
+            print("\n" + "="*60)
+            print("🔍 [DEBUG] Pure Attention Score (마스킹 전)")
+            print("="*60)
+            print(f"Score shape: {logits.shape}")
+            print(f"Score 샘플0, 노드 0~4: {logits[0, :5].detach().cpu().numpy()}")
+            print(f"Score min: {logits[0].min().item():.6f}")
+            print(f"Score max: {logits[0].max().item():.6f}")
+            print(f"Score mean: {logits[0].mean().item():.6f}")
+            print(f"Score std: {logits[0].std().item():.6f}")
+            
+            # 모든 값이 같은지 체크
+            if logits[0].std().item() < 1e-5:
+                print("❌ 경고: 모든 Score가 거의 동일함!")
+            else:
+                print("✅ Score에 다양성 있음!")
+            print("="*60 + "\n")
         
-        # 🔥 [5] Masking: 방문한 노드는 -inf로
+        # [4] Masking: 방문한 노드는 -inf
         if mask is not None:
-            logits = logits.masked_fill(mask.bool(), -1e9)
+            logits = logits.masked_fill(mask.bool(), float('-inf'))
         
-        # Softmax
+        # [5] Softmax
         probs = F.softmax(logits, dim=-1)
         
         return logits, probs
@@ -75,17 +92,15 @@ class Glimpse(nn.Module):
         super().__init__()
         self.attention = Attention(hidden_dim)
         
-    def forward(self, query, keys, mask=None):
+    def forward(self, query, keys, mask=None, debug=False):
         """
         Returns:
             context: (batch, hidden_dim) - weighted sum of keys
             probs: (batch, num_nodes) - attention weights
         """
-        logits, probs = self.attention(query, keys, mask)
+        logits, probs = self.attention(query, keys, mask, debug=debug)
         
         # Context = weighted sum of keys
-        # probs: (batch, num_nodes) -> (batch, 1, num_nodes)
-        # keys: (batch, num_nodes, hidden) 
         context = torch.bmm(probs.unsqueeze(1), keys).squeeze(1)  # (batch, hidden)
         
         return context, probs
@@ -187,40 +202,29 @@ class PointerDecoder(nn.Module):
             h, c = self.lstm(current_input, (h, c))
             
             # [Step 2] Glimpse로 context 생성 (encoder outputs 참조)
-            context, glimpse_attn = self.glimpse(h, encoder_output, mask)
+            context, glimpse_attn = self.glimpse(h, encoder_output, mask, debug=(debug and step==0))
             
             # [Step 3] Hidden과 Context 결합
             query = self.hidden_out(torch.cat([h, context], dim=-1))
             
             # [Step 4] Pointer Attention으로 노드 선택
-            logits, probs = self.pointer(query, encoder_output, mask)
+            logits, probs = self.pointer(query, encoder_output, mask, debug=(debug and step==0))
             
             # Loss 계산용 (마스킹 전 logits)
-            raw_logits, _ = self.pointer(query, encoder_output, mask=None)
+            raw_logits, _ = self.pointer(query, encoder_output, mask=None, debug=False)
             all_logits.append(raw_logits)
             all_attn.append(probs)
             
-            # 🔥 디버깅: 첫 스텝의 Attention Score 출력
+            # 🔥 디버깅: 첫 스텝의 결과 요약
             if debug and step == 0:
-                print("\n" + "="*60)
-                print("🔍 [DEBUG] Pointer Attention Score (Step 0)")
-                print("="*60)
                 n = num_nodes_list[0] if num_nodes_list else max_nodes
-                print(f"Raw logits (마스킹 전) 샘플0, 노드 0~{min(5,n)-1}:")
-                print(f"   {raw_logits[0, :min(5,n)].detach().cpu().numpy()}")
-                print(f"Logits min/max: {raw_logits[0,:n].min().item():.4f} / {raw_logits[0,:n].max().item():.4f}")
-                print(f"Probs (softmax 후) 샘플0, 노드 0~{min(5,n)-1}:")
-                print(f"   {probs[0, :min(5,n)].detach().cpu().numpy()}")
-                print(f"Probs max: {probs[0,:n].max().item():.4f} (uniform이면 ~{1.0/n:.4f})")
+                print(f"\n📊 Step 0 요약:")
+                print(f"   Probs 샘플0: {probs[0, :min(5,n)].detach().cpu().numpy()}")
+                print(f"   Probs max: {probs[0,:n].max().item():.4f} (uniform={1.0/n:.4f})")
                 
-                # Uniform 체크
-                uniform_prob = 1.0 / n
-                max_prob = probs[0,:n].max().item()
-                if max_prob < uniform_prob * 1.5:
-                    print("⚠️ 경고: Softmax가 거의 Uniform! Attention 차이가 부족함")
-                else:
-                    print("✅ Softmax 분포가 뾰족함! Attention 작동 중")
-                print("="*60 + "\n")
+                # 선택될 노드 예측
+                pred_node = probs[0].argmax().item()
+                print(f"   예측 노드: {pred_node}")
             
             # 🔥 [Step 5] 다음 노드 선택
             if training and teacher_route is not None:
