@@ -82,10 +82,11 @@ class GraphEncoder(nn.Module):
         self.num_layers = num_layers
         
         # 🔥 입력 임베딩 (좌표 → hidden_dim)
+        # LeakyReLU로 Dead Neuron 방지
         self.input_embedding = nn.Sequential(
             nn.Linear(node_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.ReLU()
+            nn.LeakyReLU(negative_slope=0.1)
         )
         
         # 🔥 원본 좌표를 직접 보존하는 별도 projection
@@ -107,10 +108,10 @@ class GraphEncoder(nn.Module):
             self.gat_layers.append(layer)
             self.norms.append(nn.LayerNorm(hidden_dim))
         
-        # FFN
+        # FFN (LeakyReLU로 Dead Neuron 방지)
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.1),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim * 4, hidden_dim)
         )
@@ -143,9 +144,9 @@ class GraphEncoder(nn.Module):
             # GAT 연산
             gat_out = gat(x, edge_index)
             
-            # 🔥 Pre-LayerNorm + Residual
+            # 🔥 Pre-LayerNorm + Residual + LeakyReLU
             x = norm(x + gat_out)
-            x = F.relu(x)
+            x = F.leaky_relu(x, negative_slope=0.1)
         
         # FFN
         ffn_out = self.ffn(x)

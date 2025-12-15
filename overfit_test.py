@@ -22,6 +22,34 @@ from model.topmodel import HybridRoutingModel
 from dataset_loss import DeliveryDataset, collate_fn
 
 
+# 🔥 Xavier 초기화 함수
+def init_weights(module):
+    """
+    Xavier/Glorot 초기화 적용
+    - Linear: Xavier Uniform
+    - Embedding: Normal(0, 0.02)
+    - LayerNorm: weight=1, bias=0
+    - Bias: 0.01 (작은 양수로 Dead Neuron 방지)
+    """
+    if isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight, gain=1.0)
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0.01)  # 🔥 0이 아닌 작은 값
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    elif isinstance(module, nn.LayerNorm):
+        nn.init.constant_(module.weight, 1.0)
+        nn.init.constant_(module.bias, 0.0)
+    elif isinstance(module, nn.LSTM):
+        for name, param in module.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param)
+            elif 'bias' in name:
+                nn.init.constant_(param, 0.01)
+
+
 def create_mini_dataset(data_path, num_samples=10):
     """
     전체 데이터에서 num_samples개만 추출
@@ -182,7 +210,7 @@ def overfit_test(
     data_path='./model_data/train_data.pkl',
     num_samples=10,
     num_epochs=500,
-    learning_rate=5e-3,  # 🔥 높은 학습률 (기본값)
+    learning_rate=0.001,  # 🔥 기본 LR (x10 부스트 적용됨)
     print_every=10
 ):
     """
@@ -243,11 +271,17 @@ def overfit_test(
         k_neighbors=10
     ).to(device)
     
+    # 🔥 Xavier 초기화 강제 적용
+    print("   - Xavier 초기화 적용 중...")
+    model.apply(init_weights)
+    
     total_params = sum(p.numel() for p in model.parameters())
     print(f"   - 파라미터 수: {total_params:,}")
     
-    # 🔥 Optimizer: 높은 학습률 + weight decay 제거
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
+    # 🔥 Optimizer: Learning Rate 10배 부스팅!
+    boosted_lr = learning_rate * 10  # 0.005 -> 0.05
+    print(f"   - Learning Rate: {boosted_lr} (10배 부스트)")
+    optimizer = optim.Adam(model.parameters(), lr=boosted_lr, weight_decay=0)
     
     # 학습 기록
     history = {
@@ -335,12 +369,15 @@ def overfit_test(
             elif gnn_grads:
                 print(f"✅ GNN Gradient 정상: avg={sum(gnn_grads)/len(gnn_grads):.6f}")
         
-        # 🔥 Gradient clipping (max_norm=5.0으로 여유있게)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        # 🔥 Gradient clipping (max_norm=1.0으로 타이트하게 - Explosion 방지)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
-        # Gradient norm이 너무 작으면 경고
-        if epoch == 0 and grad_norm < 1e-6:
-            print(f"⚠️ Gradient norm이 매우 작음: {grad_norm:.2e}")
+        # Gradient norm 체크
+        if epoch == 0:
+            if grad_norm < 1e-6:
+                print(f"⚠️ Gradient norm이 매우 작음: {grad_norm:.2e}")
+            else:
+                print(f"✅ 초기 Gradient norm: {grad_norm:.4f}")
         
         optimizer.step()
         
@@ -467,7 +504,7 @@ if __name__ == "__main__":
     history = overfit_test(
         data_path='./model_data/train_data.pkl',
         num_samples=10,
-        num_epochs=200,      # 🔥 200 에폭 (충분히 과적합 가능)
-        learning_rate=5e-3,  # 🔥 높은 학습률
-        print_every=10       # 🔥 10 에폭마다 출력
+        num_epochs=200,       # 200 에폭
+        learning_rate=0.001,  # 🔥 기본 LR (x10 부스트 → 0.01)
+        print_every=5         # 🔥 5 에폭마다 출력 (변화 관찰)
     )

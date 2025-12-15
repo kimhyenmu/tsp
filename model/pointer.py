@@ -73,16 +73,16 @@ class TimePredictor(nn.Module):
         self.feature_fusion = nn.Sequential(
             nn.Linear(hidden_dim * 2 + hidden_dim // 4 + 1, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.1),
             nn.Dropout(dropout)
         )
         
         self.time_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.1),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.1),
             nn.Linear(hidden_dim // 4, 1)
         )
         

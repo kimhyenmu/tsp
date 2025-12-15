@@ -35,15 +35,22 @@ class ContextEncoder(nn.Module):
         self.dow_embedding = nn.Embedding(7, d_model // 8)
         self.traffic_proj = nn.Linear(24, d_model // 2)
         
-        self.fusion_layer = nn.Linear(d_model * 2, d_model)
+        # 🔥 Fusion layer with activation
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU()
+        )
         self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
         
+        # 🔥 GELU 활성화 함수 사용 (Dead Neuron 방지)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=num_heads,
             dim_feedforward=d_ff,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
+            activation='gelu'  # ReLU 대신 GELU
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
