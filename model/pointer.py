@@ -124,12 +124,16 @@ class PointerDecoder(nn.Module):
         
         self.time_predictor = TimePredictor(hidden_dim, dropout)
         
-        self.start_embedding = nn.Parameter(torch.randn(1, hidden_dim))
+        # 🔥 Start embedding은 학습 가능하지만, 초기값을 작게 설정
+        self.start_embedding = nn.Parameter(torch.randn(1, hidden_dim) * 0.01)
         
         self.context_summarizer = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh()
         )
+        
+        # 🔥 Depot(0번 노드) 임베딩을 위한 projection
+        self.depot_proj = nn.Linear(hidden_dim, hidden_dim)
         
     def forward(self, encoder_output, node_coords, start_hour, 
                 num_nodes_list=None,  # 🔥 추가: 각 샘플의 유효 노드 수
@@ -153,7 +157,10 @@ class PointerDecoder(nn.Module):
         current_node_idx = torch.zeros(batch_size, dtype=torch.long, device=device)
         routes.append(current_node_idx)
         
-        current_input = self.start_embedding.expand(batch_size, -1)
+        # 🔥 Start Token: Depot(0번 노드)의 임베딩 사용
+        # 이렇게 하면 GNN 출력이 처음부터 gradient에 포함됨
+        depot_emb = encoder_output[:, 0, :]  # 0번 노드(depot)의 임베딩
+        current_input = self.depot_proj(depot_emb) + self.start_embedding.expand(batch_size, -1)
         
         # 🔥 핵심 수정: Padding Masking 초기화
         # 각 샘플의 유효 노드 수를 넘어가는 인덱스는 처음부터 마스킹
@@ -187,10 +194,23 @@ class PointerDecoder(nn.Module):
             logits_sequence.append(raw_logits)
             attention_weights_list.append(attn_weights)
             
-            if training and teacher_route is not None and torch.rand(1).item() < teacher_forcing_ratio:
+            # 🔥 Teacher Forcing 로직 개선
+            # teacher_forcing_ratio=1.0이면 항상 정답 사용
+            use_teacher_forcing = (
+                training and 
+                teacher_route is not None and 
+                teacher_forcing_ratio >= 1.0  # 🔥 1.0이면 무조건 적용
+            )
+            
+            if not use_teacher_forcing and training and teacher_route is not None:
+                # ratio < 1.0이면 확률적으로 적용
+                use_teacher_forcing = torch.rand(1).item() < teacher_forcing_ratio
+            
+            if use_teacher_forcing:
+                # 🔥 Teacher Forcing: 정답 경로 사용
                 next_node_idx = teacher_route[:, step + 1]
             else:
-                # 🔥 노드 선택에는 masked_logits 사용 (중복 방문 방지)
+                # 🔥 Free Running: 모델 예측 사용
                 if training:
                     probs = F.softmax(masked_logits / 1.0, dim=-1)
                     next_node_idx = torch.multinomial(probs, 1).squeeze(-1)
@@ -199,6 +219,7 @@ class PointerDecoder(nn.Module):
             
             routes.append(next_node_idx)
             
+            # 🔥 현재 노드와 다음 노드의 임베딩 (GNN 출력에서 가져옴)
             current_node_emb = encoder_output[torch.arange(batch_size), current_node_idx]
             next_node_emb = encoder_output[torch.arange(batch_size), next_node_idx]
             
@@ -212,9 +233,13 @@ class PointerDecoder(nn.Module):
             elapsed_hours = (predicted_time / 3600.0).long()
             current_hour = (current_hour + elapsed_hours) % 24
             
+            # 🔥 마스크 업데이트 (방문한 노드 표시)
             mask[torch.arange(batch_size), next_node_idx] = 1
             
             current_node_idx = next_node_idx
+            
+            # 🔥 핵심: 다음 LSTM 입력은 선택된 노드의 임베딩
+            # Teacher Forcing 시에는 정답 노드의 임베딩이 사용됨
             current_input = next_node_emb
         
         routes = torch.stack(routes, dim=1)

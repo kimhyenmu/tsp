@@ -74,6 +74,7 @@ class MiniDataset(torch.utils.data.Dataset):
 def compute_loss_detailed(predictions, targets, num_nodes_list, device):
     """
     상세 Loss 계산 (디버깅용)
+    🔥 Route Loss만 계산 (과적합 테스트 단순화)
     """
     logits = predictions['logits']
     predicted_times = predictions['predicted_times']
@@ -82,7 +83,7 @@ def compute_loss_detailed(predictions, targets, num_nodes_list, device):
     
     batch_size = logits.size(0)
     
-    # Route Loss
+    # Route Loss (CrossEntropy)
     route_losses = []
     correct = 0
     total = 0
@@ -92,9 +93,11 @@ def compute_loss_detailed(predictions, targets, num_nodes_list, device):
         
         for step in range(n - 1):
             target = actual_route[b, step + 1]
+            
+            # 🔥 유효 노드만 사용 (패딩 제외)
             step_logits = logits[b, step, :n]
             
-            # CrossEntropy
+            # CrossEntropy Loss
             loss = F.cross_entropy(step_logits.unsqueeze(0), target.unsqueeze(0))
             route_losses.append(loss)
             
@@ -103,10 +106,11 @@ def compute_loss_detailed(predictions, targets, num_nodes_list, device):
                 correct += 1
             total += 1
     
+    # 🔥 모든 loss를 합쳐서 평균
     route_loss = torch.stack(route_losses).mean()
     route_acc = correct / total if total > 0 else 0
     
-    # Time Loss
+    # Time Loss (간소화)
     time_losses = []
     for b in range(batch_size):
         n = num_nodes_list[b]
@@ -121,8 +125,8 @@ def compute_loss_detailed(predictions, targets, num_nodes_list, device):
     
     time_loss = torch.stack(time_losses).mean() if time_losses else torch.tensor(0.0, device=device)
     
-    # Total
-    total_loss = route_loss + 0.05 * time_loss
+    # 🔥 Route Loss에 더 집중 (과적합 테스트에서는 경로 예측이 핵심)
+    total_loss = route_loss + 0.01 * time_loss
     
     return {
         'total_loss': total_loss,
@@ -178,7 +182,7 @@ def overfit_test(
     data_path='./model_data/train_data.pkl',
     num_samples=10,
     num_epochs=500,
-    learning_rate=1e-3,
+    learning_rate=5e-3,  # 🔥 높은 학습률 (기본값)
     print_every=10
 ):
     """
@@ -190,6 +194,7 @@ def overfit_test(
     print(f"샘플 수: {num_samples}")
     print(f"에폭 수: {num_epochs}")
     print(f"학습률: {learning_rate}")
+    print(f"Teacher Forcing: 100% (강제)")
     print("="*70)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -216,6 +221,13 @@ def overfit_test(
     print(f"   - actual_route shape: {batch['actual_route'].shape}")
     print(f"   - num_nodes: {batch['num_nodes']}")
     
+    # 🔥 정답 경로 출력 (디버깅용)
+    print(f"\n📍 정답 경로 샘플:")
+    for i in range(min(3, num_samples)):
+        n = batch['num_nodes'][i]
+        route = batch['actual_route'][i, :n].cpu().numpy()
+        print(f"   샘플 {i}: {route}")
+    
     # 모델 초기화
     print("\n🧠 모델 초기화...")
     model = HybridRoutingModel(
@@ -234,8 +246,8 @@ def overfit_test(
     total_params = sum(p.numel() for p in model.parameters())
     print(f"   - 파라미터 수: {total_params:,}")
     
-    # Optimizer (과적합 테스트에는 높은 학습률)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # 🔥 Optimizer: 높은 학습률 + weight decay 제거
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
     
     # 학습 기록
     history = {
@@ -251,10 +263,27 @@ def overfit_test(
     
     model.train()
     
+    # 🔥 초기 gradient 흐름 테스트
+    print("\n🔍 초기 Gradient 흐름 테스트...")
+    optimizer.zero_grad()
+    test_pred = model(batch, training=True, teacher_forcing_ratio=1.0)
+    test_targets = {'actual_route': batch['actual_route'], 'actual_times': batch['actual_times']}
+    test_loss = compute_loss_detailed(test_pred, test_targets, batch['num_nodes'], device)
+    test_loss['total_loss'].backward()
+    
+    grad_info, module_grads = check_gradients(model, verbose=True)
+    gnn_grads = module_grads.get('gnn_encoder', [])
+    if gnn_grads and sum(gnn_grads) > 0:
+        print("✅ GNN Gradient 흐름 확인됨")
+    else:
+        print("❌ GNN Gradient 없음 - 구조적 문제!")
+    
+    optimizer.zero_grad()  # 테스트 후 초기화
+    
     for epoch in range(num_epochs):
         optimizer.zero_grad()
         
-        # Forward (항상 teacher_forcing=1.0)
+        # 🔥 Forward (Teacher Forcing 100% 강제)
         predictions = model(batch, training=True, teacher_forcing_ratio=1.0)
         
         # Loss 계산
@@ -289,8 +318,12 @@ def overfit_test(
             elif gnn_grads:
                 print(f"✅ GNN Gradient 정상: avg={sum(gnn_grads)/len(gnn_grads):.6f}")
         
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # 🔥 Gradient clipping (max_norm=5.0으로 여유있게)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        
+        # Gradient norm이 너무 작으면 경고
+        if epoch == 0 and grad_norm < 1e-6:
+            print(f"⚠️ Gradient norm이 매우 작음: {grad_norm:.2e}")
         
         optimizer.step()
         
@@ -417,7 +450,7 @@ if __name__ == "__main__":
     history = overfit_test(
         data_path='./model_data/train_data.pkl',
         num_samples=10,
-        num_epochs=500,
-        learning_rate=1e-3,
-        print_every=20
+        num_epochs=200,      # 🔥 200 에폭 (충분히 과적합 가능)
+        learning_rate=5e-3,  # 🔥 높은 학습률
+        print_every=10       # 🔥 10 에폭마다 출력
     )
