@@ -51,8 +51,12 @@ class Attention(nn.Module):
         score = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
         score = score.squeeze(1)  # (batch, num_nodes)
         
-        # [3] Scaling: 1 / sqrt(d)
+        # [3] Scaling: 1 / sqrt(d) - NaN 방지 핵심!
         logits = score / math.sqrt(self.hidden_dim)
+        
+        # 🔥 [추가] 값 범위 제한 (Overflow 방지)
+        # logits가 너무 크면 exp()에서 inf가 되어 NaN 발생
+        logits = torch.clamp(logits, min=-50.0, max=50.0)
         
         # 🔥 디버깅: 마스킹 전 score 분포 출력
         if debug and not self.debug_printed:
@@ -67,6 +71,10 @@ class Attention(nn.Module):
             print(f"Score mean: {logits[0].mean().item():.6f}")
             print(f"Score std: {logits[0].std().item():.6f}")
             
+            # 값이 너무 큰지 체크
+            if abs(logits[0].max().item()) > 30:
+                print("⚠️ 경고: Score 값이 큼! Overflow 위험")
+            
             # 모든 값이 같은지 체크
             if logits[0].std().item() < 1e-5:
                 print("❌ 경고: 모든 Score가 거의 동일함!")
@@ -78,8 +86,10 @@ class Attention(nn.Module):
         if mask is not None:
             logits = logits.masked_fill(mask.bool(), float('-inf'))
         
-        # [5] Softmax
-        probs = F.softmax(logits, dim=-1)
+        # [5] 🔥 안전한 Softmax (Numerical Stability)
+        # max를 빼서 overflow 방지
+        logits_stable = logits - logits.max(dim=-1, keepdim=True)[0]
+        probs = F.softmax(logits_stable, dim=-1)
         
         return logits, probs
 

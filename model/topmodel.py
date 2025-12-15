@@ -29,12 +29,15 @@ class HybridRoutingModel(nn.Module):
         
         # 🔥🔥🔥 [최종 처방] ID Embedding 사용!
         # 좌표(continuous) 대신 노드 ID(discrete)로 임베딩
-        # 각 노드가 완전히 다른 벡터를 가지게 됨
         MAX_NODES = 200  # 최대 노드 수
         self.node_embedding = nn.Embedding(MAX_NODES, hidden_dim)
         
-        # 좌표 정보도 추가로 사용 (옵션)
+        # 🔥 안전한 초기화 (작은 값으로 시작)
+        nn.init.normal_(self.node_embedding.weight, mean=0.0, std=0.1)
+        
+        # 좌표 정보도 추가로 사용
         self.coord_proj = nn.Linear(node_dim, hidden_dim, bias=False)
+        nn.init.xavier_uniform_(self.coord_proj.weight, gain=0.1)  # 🔥 작은 gain
         
         self.gnn_encoder = GraphEncoder(
             node_dim=node_dim,
