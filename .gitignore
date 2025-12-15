@@ -1,0 +1,20 @@
+# data files
+*.parquet
+*.pkl
+model_data/
+data/
+datasets/
+
+# model checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# logs
+runs/
+logs/
+
+# python cache
+__pycache__/
+*.pyc
+
