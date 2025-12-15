@@ -22,35 +22,29 @@ from model.topmodel import HybridRoutingModel
 from dataset_loss import DeliveryDataset, collate_fn
 
 
-# 🔥 Xavier 초기화 함수 (Gain 증폭!)
+# 🔥 Xavier 초기화 함수 (안전 버전 - NaN 방지)
 def init_weights(module):
     """
-    Xavier/Glorot 초기화 적용 (강화 버전)
-    - Linear: Xavier Uniform with gain=2.0 (차이를 벌림)
-    - Embedding: Normal(0, 0.1) (더 큰 분산)
+    Xavier/Glorot 초기화 적용 (안전 버전)
+    - Linear: Xavier Uniform with gain=1.0 (표준)
+    - Embedding: Normal(0, 0.02) (작은 분산)
     - LayerNorm: weight=1, bias=0
-    - Bias: 0으로 (차이를 덮지 않게)
     """
-    # 🔥 simple_embedding은 이미 별도로 초기화했으므로 건너뜀
-    if hasattr(module, '_custom_initialized'):
-        return
-        
     if isinstance(module, nn.Linear):
-        # 🔥 gain=2.0으로 가중치 차이 증폭
-        nn.init.xavier_uniform_(module.weight, gain=2.0)
+        nn.init.xavier_uniform_(module.weight, gain=1.0)  # 🔥 gain=1.0 (안전)
         if module.bias is not None:
-            nn.init.constant_(module.bias, 0.0)  # 🔥 bias=0 (차이를 덮지 않게)
+            nn.init.constant_(module.bias, 0.0)
     elif isinstance(module, nn.Embedding):
-        nn.init.normal_(module.weight, mean=0.0, std=0.1)  # 🔥 더 큰 std
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)  # 🔥 작은 std
     elif isinstance(module, nn.LayerNorm):
         nn.init.constant_(module.weight, 1.0)
         nn.init.constant_(module.bias, 0.0)
     elif isinstance(module, nn.LSTMCell):
         for name, param in module.named_parameters():
             if 'weight_ih' in name:
-                nn.init.xavier_uniform_(param, gain=2.0)
+                nn.init.xavier_uniform_(param, gain=1.0)
             elif 'weight_hh' in name:
-                nn.init.orthogonal_(param, gain=2.0)
+                nn.init.orthogonal_(param, gain=1.0)
             elif 'bias' in name:
                 nn.init.constant_(param, 0.0)
 
@@ -215,7 +209,7 @@ def overfit_test(
     data_path='./model_data/train_data.pkl',
     num_samples=10,
     num_epochs=500,
-    learning_rate=0.001,  # 🔥 기본 LR (x10 부스트 적용됨)
+    learning_rate=1e-4,  # 🔥 안전한 LR (NaN 방지)
     print_every=10
 ):
     """
@@ -310,10 +304,10 @@ def overfit_test(
     total_params = sum(p.numel() for p in model.parameters())
     print(f"   - 파라미터 수: {total_params:,}")
     
-    # 🔥 Optimizer: Learning Rate 10배 부스팅!
-    boosted_lr = learning_rate * 10  # 0.005 -> 0.05
-    print(f"   - Learning Rate: {boosted_lr} (10배 부스트)")
-    optimizer = optim.Adam(model.parameters(), lr=boosted_lr, weight_decay=0)
+    # 🔥 Optimizer: 안전한 Learning Rate (NaN 방지)
+    # 10배 부스트 제거! 기본 LR 그대로 사용
+    print(f"   - Learning Rate: {learning_rate} (안전 모드)")
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
     
     # 학습 기록
     history = {
@@ -374,7 +368,15 @@ def overfit_test(
         loss_dict = compute_loss_detailed(predictions, targets, batch['num_nodes'], device)
         
         # Backward
-        loss_dict['total_loss'].backward()
+        loss = loss_dict['total_loss']
+        
+        # 🔥 NaN 체크 (Backward 전)
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"\n❌ Loss NaN/Inf 발생! Epoch {epoch+1}, Loss={loss.item()}")
+            print("   → Learning Rate를 더 낮추거나 초기화 확인 필요")
+            break
+        
+        loss.backward()
         
         # Gradient 확인 (첫 에폭과 중간중간)
         if epoch == 0 or (epoch + 1) % 100 == 0:
@@ -532,7 +534,7 @@ if __name__ == "__main__":
     history = overfit_test(
         data_path='./model_data/train_data.pkl',
         num_samples=10,
-        num_epochs=200,       # 200 에폭
-        learning_rate=0.001,  # 🔥 기본 LR (x10 부스트 → 0.01)
-        print_every=5         # 🔥 5 에폭마다 출력 (변화 관찰)
+        num_epochs=200,        # 200 에폭
+        learning_rate=1e-4,    # 🔥 안전한 LR (0.0001) - NaN 방지
+        print_every=5          # 5 에폭마다 출력
     )
