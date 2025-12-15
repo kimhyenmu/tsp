@@ -263,7 +263,7 @@ def overfit_test(
     
     model.train()
     
-    # 🔥 초기 gradient 흐름 테스트
+    # 🔥 초기 Gradient 흐름 테스트 + GNN 출력 확인
     print("\n🔍 초기 Gradient 흐름 테스트...")
     optimizer.zero_grad()
     test_pred = model(batch, training=True, teacher_forcing_ratio=1.0)
@@ -277,6 +277,23 @@ def overfit_test(
         print("✅ GNN Gradient 흐름 확인됨")
     else:
         print("❌ GNN Gradient 없음 - 구조적 문제!")
+    
+    # 🔥 GNN 출력 통계 확인
+    print("\n📊 GNN 출력 통계:")
+    with torch.no_grad():
+        # 간단히 첫 번째 샘플의 GNN 출력 확인
+        n = batch['num_nodes'][0]
+        coords = batch['node_features'][0, :n, :]
+        from model.gnn import build_fully_connected_graph
+        edge_index = build_fully_connected_graph(coords)
+        print(f"   - 노드 수: {n}, 엣지 수: {edge_index.size(1)}")
+        print(f"   - 완전 연결 여부: {edge_index.size(1) == n * (n - 1)}")
+        
+        gnn_out = model.gnn_encoder(coords, edge_index)
+        print(f"   - GNN 출력 shape: {gnn_out.shape}")
+        print(f"   - GNN 출력 mean: {gnn_out.mean().item():.4f}")
+        print(f"   - GNN 출력 std: {gnn_out.std().item():.4f}")
+        print(f"   - GNN 출력 min/max: {gnn_out.min().item():.4f} / {gnn_out.max().item():.4f}")
     
     optimizer.zero_grad()  # 테스트 후 초기화
     

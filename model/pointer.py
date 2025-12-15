@@ -5,36 +5,53 @@ import math
 from datetime import timedelta  
 
 class PointerAttention(nn.Module):
+    """
+    🔥 개선된 Pointer Attention
+    - Scaled Dot-Product 방식으로 변경 (더 안정적인 gradient)
+    - Bahdanau Attention과 Dot-Product Attention 결합
+    """
     def __init__(self, hidden_dim, num_heads=1):
         super().__init__()
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         
-        self.W_ref = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.W_query = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.V = nn.Linear(hidden_dim, num_heads, bias=False)
+        # Query, Key, Value projections
+        self.W_query = nn.Linear(hidden_dim, hidden_dim)
+        self.W_key = nn.Linear(hidden_dim, hidden_dim)
         
-        self.scale = 10.0 / math.sqrt(hidden_dim)
+        # 🔥 Attention scale (학습 가능)
+        self.scale = nn.Parameter(torch.tensor(1.0 / math.sqrt(hidden_dim)))
+        
+        # 🔥 Temperature (logits 범위 조절)
+        self.temperature = nn.Parameter(torch.tensor(1.0))
         
     def forward(self, query, ref, mask=None):
-        query_transformed = self.W_query(query).unsqueeze(1)
-        ref_transformed = self.W_ref(ref)
+        """
+        Args:
+            query: (batch, hidden_dim) - decoder state
+            ref: (batch, num_nodes, hidden_dim) - encoder outputs (GNN 출력)
+            mask: (batch, num_nodes) - 방문한 노드 마스크
         
-        combined = torch.tanh(query_transformed + ref_transformed)
-        logits = self.V(combined)
+        Returns:
+            logits: (batch, num_nodes)
+            attention_weights: (batch, num_nodes)
+        """
+        # Query와 Key 변환
+        q = self.W_query(query)  # (batch, hidden_dim)
+        k = self.W_key(ref)       # (batch, num_nodes, hidden_dim)
         
-        if self.num_heads > 1:
-            logits = logits.mean(dim=-1)
-        else:
-            logits = logits.squeeze(-1)
+        # 🔥 Scaled Dot-Product Attention
+        # logits = (q @ k^T) / sqrt(d)
+        q = q.unsqueeze(1)  # (batch, 1, hidden_dim)
+        logits = torch.bmm(q, k.transpose(1, 2))  # (batch, 1, num_nodes)
+        logits = logits.squeeze(1)  # (batch, num_nodes)
         
-        logits = logits * self.scale
+        # 🔥 Scale 적용 (학습 가능한 temperature)
+        logits = logits * torch.abs(self.scale) * torch.clamp(self.temperature, min=0.1, max=10.0)
         
+        # 마스킹
         if mask is not None:
-            # 🔥 마스킹 값을 적절히 설정 (-100)
-            # -1e9는 label_smoothing과 충돌하여 Loss 폭발!
-            # -100이면 softmax 후 거의 0이 되면서도 수치적으로 안정
             logits = logits.masked_fill(mask.bool(), -100.0)
         
         attention_weights = F.softmax(logits, dim=-1)

@@ -5,7 +5,7 @@ from torch_geometric.nn import knn_graph
 from .gnn import GraphEncoder
 from .transform import ContextEncoder
 from .pointer import PointerDecoder
-from .gnn import build_knn_graph_manual 
+from .gnn import build_knn_graph_manual, build_fully_connected_graph 
 class HybridRoutingModel(nn.Module):
     def __init__(
         self,
@@ -54,32 +54,29 @@ class HybridRoutingModel(nn.Module):
         device = node_features.device
         num_nodes_list = batch['num_nodes']
         
-        # 🔥 GNN 처리 (Gradient 흐름 유지 확인)
+        # 🔥 GNN 처리 (완전 연결 그래프 사용)
         gnn_outputs = []
         for i in range(batch_size):
             n = num_nodes_list[i]
             
-            # 🔥 유효 노드만 추출 (slicing은 gradient 유지)
-            coords = node_features[i, :n, :]
+            # 유효 노드만 추출
+            coords = node_features[i, :n, :]  # (n, 2)
             
-            # k-NN 그래프 생성 (이 부분은 gradient 불필요)
-            k = min(self.k_neighbors, n - 1)
-            edge_index = build_knn_graph_manual(coords, k=k)
+            # 🔥 완전 연결 그래프 생성 (TSP/VRP에 적합)
+            # 모든 노드가 서로 연결되어 GAT가 전체 정보를 볼 수 있음
+            edge_index = build_fully_connected_graph(coords)
             
-            # 🔥 GNN 인코딩 (이 부분에서 gradient 필요!)
-            gnn_out = self.gnn_encoder(coords, edge_index)
+            # GNN 인코딩
+            gnn_out = self.gnn_encoder(coords, edge_index)  # (n, hidden_dim)
             
-            # 🔥 패딩 추가 시 gradient 유지를 위해 F.pad 사용
+            # 패딩 추가
             if n < max_nodes:
-                # (max_nodes - n, hidden_dim) 크기의 패딩
-                # F.pad는 gradient를 유지함
                 pad_size = max_nodes - n
                 gnn_out = F.pad(gnn_out, (0, 0, 0, pad_size), mode='constant', value=0)
             
             gnn_outputs.append(gnn_out)
         
-        # 🔥 stack은 gradient를 유지
-        gnn_features = torch.stack(gnn_outputs, dim=0)
+        gnn_features = torch.stack(gnn_outputs, dim=0)  # (batch, max_nodes, hidden_dim)
         
         # Transformer
         context_features = self.context_encoder(
